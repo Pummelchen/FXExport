@@ -1,5 +1,10 @@
 {
   "broker_source_id": "demo-broker-mt5",
+  "expected_terminal_identity": {
+    "company": null,
+    "server": null,
+    "account_login": null
+  },
   "offset_segments": [
     {
       "valid_from_mt5_server_ts": 0,

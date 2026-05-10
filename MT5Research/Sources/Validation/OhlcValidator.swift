@@ -13,7 +13,10 @@ public enum ValidationError: Error, Equatable, CustomStringConvertible, Sendable
     case invalidOhlcInvariant(MT5ServerSecond)
     case unsortedBatch(previous: MT5ServerSecond, current: MT5ServerSecond)
     case duplicateTimestamp(MT5ServerSecond)
+    case unsortedUTC(previous: UtcSecond, current: UtcSecond)
+    case duplicateUTCTimestamp(UtcSecond)
     case timeMapping(String)
+    case unverifiedUTCOffset(MT5ServerSecond, OffsetConfidence)
 
     public var description: String {
         switch self {
@@ -37,8 +40,14 @@ public enum ValidationError: Error, Equatable, CustomStringConvertible, Sendable
             return "Batch is not strictly sorted: \(previous.rawValue) then \(current.rawValue)."
         case .duplicateTimestamp(let time):
             return "Batch contains duplicate MT5 server timestamp \(time.rawValue)."
+        case .unsortedUTC(let previous, let current):
+            return "Converted UTC timestamps are not strictly sorted: \(previous.rawValue) then \(current.rawValue). Check broker offset segment boundaries."
+        case .duplicateUTCTimestamp(let time):
+            return "Batch contains duplicate converted UTC timestamp \(time.rawValue). Check broker offset segment boundaries."
         case .timeMapping(let reason):
             return "Time mapping failed: \(reason)"
+        case .unverifiedUTCOffset(let time, let confidence):
+            return "MT5 server timestamp \(time.rawValue) mapped with \(confidence.rawValue) UTC offset. Canonical ingestion requires verified offsets."
         }
     }
 }
@@ -80,7 +89,9 @@ public struct OhlcValidator: Sendable {
 
     public func validateBatch(_ bars: [ClosedM1Bar], context: OhlcValidationContext) throws -> [ValidatedBar] {
         var seen = Set<MT5ServerSecond>()
+        var seenUTC = Set<UtcSecond>()
         var previous: MT5ServerSecond?
+        var previousUTC: UtcSecond?
         var validated: [ValidatedBar] = []
         validated.reserveCapacity(bars.count)
 
@@ -94,7 +105,15 @@ public struct OhlcValidator: Sendable {
                 throw ValidationError.duplicateTimestamp(bar.mt5ServerTime)
             }
 
-            validated.append(try validate(bar, context: context))
+            let validatedBar = try validate(bar, context: context)
+            guard seenUTC.insert(validatedBar.utcTime).inserted else {
+                throw ValidationError.duplicateUTCTimestamp(validatedBar.utcTime)
+            }
+            if let previousUTC, validatedBar.utcTime.rawValue <= previousUTC.rawValue {
+                throw ValidationError.unsortedUTC(previous: previousUTC, current: validatedBar.utcTime)
+            }
+            previousUTC = validatedBar.utcTime
+            validated.append(validatedBar)
         }
 
         return validated
@@ -133,6 +152,9 @@ public struct OhlcValidator: Sendable {
             converted = try timeConverter.convert(mt5ServerTime: bar.mt5ServerTime)
         } catch {
             throw ValidationError.timeMapping(String(describing: error))
+        }
+        guard converted.confidence == .verified else {
+            throw ValidationError.unverifiedUTCOffset(bar.mt5ServerTime, converted.confidence)
         }
 
         return ValidatedBar(

@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS {database}.verification_results
     checked_at_utc Int64
 )
 ENGINE = MergeTree
-PARTITION BY toYYYYMM(toDateTime(checked_at_utc))
+PARTITION BY toYYYYMM(toDateTime(checked_at_utc, 'UTC'))
 ORDER BY (broker_source_id, logical_symbol, checked_at_utc);
 
 CREATE TABLE IF NOT EXISTS {database}.repair_log
@@ -54,5 +54,5 @@ CREATE TABLE IF NOT EXISTS {database}.repair_log
     created_at_utc Int64
 )
 ENGINE = MergeTree
-PARTITION BY toYYYYMM(toDateTime(created_at_utc))
+PARTITION BY toYYYYMM(toDateTime(created_at_utc, 'UTC'))
 ORDER BY (broker_source_id, logical_symbol, created_at_utc);

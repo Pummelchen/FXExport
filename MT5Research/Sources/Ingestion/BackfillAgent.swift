@@ -9,20 +9,32 @@ import Validation
 
 public enum IngestError: Error, CustomStringConvertible, Sendable {
     case symbolMissing(String)
+    case selectedSymbolNotConfigured(String)
     case digitsMismatch(symbol: String, expected: Int, actual: Int)
     case emptyMT5Range(String)
     case invalidChunk(String)
+    case invalidBridgeResponse(String)
+    case canonicalInsertVerificationFailed(String)
+    case terminalIdentityMismatch(String)
 
     public var description: String {
         switch self {
         case .symbolMissing(let symbol):
             return "Configured MT5 symbol '\(symbol)' is missing or cannot be selected."
+        case .selectedSymbolNotConfigured(let symbol):
+            return "Requested symbol '\(symbol)' is not configured in symbols.json."
         case .digitsMismatch(let symbol, let expected, let actual):
             return "\(symbol) digits mismatch. Config expected \(expected), MT5 reported \(actual)."
         case .emptyMT5Range(let symbol):
             return "\(symbol) has no closed M1 history available in MT5."
         case .invalidChunk(let reason):
             return "Invalid ingest chunk: \(reason)"
+        case .invalidBridgeResponse(let reason):
+            return "Invalid MT5 bridge response: \(reason)"
+        case .canonicalInsertVerificationFailed(let reason):
+            return "Canonical insert verification failed: \(reason)"
+        case .terminalIdentityMismatch(let reason):
+            return "MT5 terminal identity mismatch: \(reason)"
         }
     }
 }
@@ -49,7 +61,14 @@ public struct BackfillAgent: Sendable {
     }
 
     public func run(selectedSymbols: [LogicalSymbol]?) async throws {
+        try validateTerminalIdentity()
         let selected = selectedSymbols.map(Set.init)
+        if let selectedSymbols {
+            let configured = Set(config.symbols.symbols.map(\.logicalSymbol))
+            if let missing = selectedSymbols.first(where: { !configured.contains($0) }) {
+                throw IngestError.selectedSymbolNotConfigured(missing.rawValue)
+            }
+        }
         let mappings = config.symbols.symbols.filter { mapping in
             selected?.contains(mapping.logicalSymbol) ?? true
         }
@@ -87,8 +106,12 @@ public struct BackfillAgent: Sendable {
         }
 
         logger.info("\(mapping.logicalSymbol.rawValue): discovering oldest available M1 bar")
-        let oldest = MT5ServerSecond(rawValue: try bridge.oldestM1BarTime(mapping.mt5Symbol).mt5ServerTime)
-        let latestClosed = MT5ServerSecond(rawValue: try bridge.latestClosedM1Bar(mapping.mt5Symbol).mt5ServerTime)
+        let oldestResponse = try bridge.oldestM1BarTime(mapping.mt5Symbol)
+        try validateSingleTimeResponse(oldestResponse, expectedMT5Symbol: mapping.mt5Symbol)
+        let latestClosedResponse = try bridge.latestClosedM1Bar(mapping.mt5Symbol)
+        try validateSingleTimeResponse(latestClosedResponse, expectedMT5Symbol: mapping.mt5Symbol)
+        let oldest = MT5ServerSecond(rawValue: oldestResponse.mt5ServerTime)
+        let latestClosed = MT5ServerSecond(rawValue: latestClosedResponse.mt5ServerTime)
         guard oldest.rawValue <= latestClosed.rawValue else {
             throw IngestError.emptyMT5Range(mapping.logicalSymbol.rawValue)
         }
@@ -118,10 +141,15 @@ public struct BackfillAgent: Sendable {
                 toExclusive: range.toExclusive,
                 maxBars: config.app.chunkSize
             )
+            try validateRatesResponse(response, expectedMT5Symbol: mapping.mt5Symbol)
             let closedBars = try response.rates.map {
                 try $0.toClosedM1Bar(logicalSymbol: mapping.logicalSymbol, mt5Symbol: mapping.mt5Symbol, digits: mapping.digits)
             }
-            guard !closedBars.isEmpty else { break }
+            guard !closedBars.isEmpty else {
+                logger.warn("\(mapping.logicalSymbol.rawValue): no MT5 bars in server-time range \(range.from.rawValue)..<\(range.toExclusive.rawValue); advancing over source gap")
+                cursor = range.toExclusive
+                continue
+            }
 
             let now = UtcSecond(rawValue: Int64(Date().timeIntervalSince1970))
             let context = OhlcValidationContext(
@@ -157,6 +185,44 @@ public struct BackfillAgent: Sendable {
     private func insertValidatedBars(_ bars: [ValidatedBar], insertBuilder: ClickHouseInsertBuilder) async throws {
         guard !bars.isEmpty else { return }
         _ = try await clickHouse.execute(insertBuilder.rawBarsInsert(bars))
+        _ = try await clickHouse.execute(try insertBuilder.canonicalRangeDelete(bars))
         _ = try await clickHouse.execute(insertBuilder.canonicalBarsInsert(bars))
+        try await CanonicalInsertVerifier(clickHouse: clickHouse, insertBuilder: insertBuilder).verify(bars)
+    }
+
+    private func validateSingleTimeResponse(_ response: SingleTimeResponseDTO, expectedMT5Symbol: MT5Symbol) throws {
+        guard response.mt5Symbol == expectedMT5Symbol.rawValue else {
+            throw IngestError.invalidBridgeResponse("expected \(expectedMT5Symbol.rawValue), got \(response.mt5Symbol)")
+        }
+        guard MT5ServerSecond(rawValue: response.mt5ServerTime).isMinuteAligned else {
+            throw IngestError.invalidBridgeResponse("MT5 timestamp \(response.mt5ServerTime) is not minute-aligned")
+        }
+    }
+
+    private func validateRatesResponse(_ response: RatesResponseDTO, expectedMT5Symbol: MT5Symbol) throws {
+        guard response.mt5Symbol == expectedMT5Symbol.rawValue else {
+            throw IngestError.invalidBridgeResponse("expected rates for \(expectedMT5Symbol.rawValue), got \(response.mt5Symbol)")
+        }
+        guard response.timeframe == Timeframe.m1.rawValue else {
+            throw IngestError.invalidBridgeResponse("expected M1 rates, got \(response.timeframe)")
+        }
+    }
+
+    private func validateTerminalIdentity() throws {
+        guard let expected = config.brokerTime.expectedTerminalIdentity, !expected.isEmpty else {
+            logger.warn("No expected MT5 terminal identity configured for broker_source_id \(config.brokerTime.brokerSourceId.rawValue)")
+            return
+        }
+        let actual = try bridge.terminalInfo()
+        if let company = expected.company, company != actual.company {
+            throw IngestError.terminalIdentityMismatch("expected company '\(company)', got '\(actual.company)'")
+        }
+        if let server = expected.server, server != actual.server {
+            throw IngestError.terminalIdentityMismatch("expected server '\(server)', got '\(actual.server)'")
+        }
+        if let accountLogin = expected.accountLogin, accountLogin != actual.accountLogin {
+            throw IngestError.terminalIdentityMismatch("expected account \(accountLogin), got \(actual.accountLogin)")
+        }
+        logger.ok("MT5 terminal identity verified for broker_source_id \(config.brokerTime.brokerSourceId.rawValue)")
     }
 }

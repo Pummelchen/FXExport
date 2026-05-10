@@ -32,7 +32,7 @@ struct MT5ResearchCLI {
             switch options.command {
             case .migrate:
                 logger.db("Connecting to ClickHouse at \(config.clickHouse.url.absoluteString)")
-                _ = try await clickHouse.execute(.select("SELECT 1"))
+                _ = try await clickHouse.execute(.select("SELECT 1", databaseOverride: "default"))
                 logger.ok("ClickHouse connection verified")
                 try await ClickHouseMigrator(client: clickHouse, config: config.clickHouse, logger: logger)
                     .migrate(migrationsDirectory: options.migrationsDirectory)
@@ -89,7 +89,7 @@ struct MT5ResearchCLI {
                     insertBuilder: ClickHouseInsertBuilder(database: config.clickHouse.database),
                     database: config.clickHouse.database
                 )
-                await LiveUpdateAgent(
+                try await LiveUpdateAgent(
                     config: config,
                     bridge: bridge,
                     clickHouse: clickHouse,

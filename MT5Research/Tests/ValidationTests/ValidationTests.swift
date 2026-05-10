@@ -30,6 +30,44 @@ final class ValidationTests: XCTestCase {
         let bar = try fixture.bar()
         XCTAssertThrowsError(try fixture.validator.validateBatch([bar, bar], context: fixture.context))
     }
+
+    func testInferredOffsetIsRejectedForCanonicalValidation() throws {
+        let fixture = try ValidationFixture(offsetConfidence: .inferred)
+        let bar = try fixture.bar()
+        XCTAssertThrowsError(try fixture.validator.validateBatch([bar], context: fixture.context)) { error in
+            guard case ValidationError.unverifiedUTCOffset = error else {
+                XCTFail("Expected unverified UTC offset error, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testUTCSequenceMustStayStrictlyIncreasingAcrossOffsetSegments() throws {
+        let fixture = try ValidationFixture(offsetSegments: [
+            BrokerTimeOffsetConfig(
+                validFromMT5ServerTs: MT5ServerSecond(rawValue: 0),
+                validToMT5ServerTs: MT5ServerSecond(rawValue: 1_700_007_300),
+                offsetSeconds: OffsetSeconds(rawValue: 0),
+                source: .configured,
+                confidence: .verified
+            ),
+            BrokerTimeOffsetConfig(
+                validFromMT5ServerTs: MT5ServerSecond(rawValue: 1_700_007_300),
+                validToMT5ServerTs: MT5ServerSecond(rawValue: 2_000_000_000),
+                offsetSeconds: OffsetSeconds(rawValue: 3600),
+                source: .configured,
+                confidence: .verified
+            )
+        ])
+        let first = try fixture.bar(time: MT5ServerSecond(rawValue: 1_700_007_240))
+        let second = try fixture.bar(time: MT5ServerSecond(rawValue: 1_700_007_300))
+        XCTAssertThrowsError(try fixture.validator.validateBatch([first, second], context: fixture.context)) { error in
+            guard case ValidationError.unsortedUTC = error else {
+                XCTFail("Expected unsorted UTC error, got \(error)")
+                return
+            }
+        }
+    }
 }
 
 private struct ValidationFixture {
@@ -40,7 +78,11 @@ private struct ValidationFixture {
     let validator: OhlcValidator
     let context: OhlcValidationContext
 
-    init(latestClosed: MT5ServerSecond = MT5ServerSecond(rawValue: 1_700_007_300)) throws {
+    init(
+        latestClosed: MT5ServerSecond = MT5ServerSecond(rawValue: 1_700_007_300),
+        offsetConfidence: OffsetConfidence = .verified,
+        offsetSegments: [BrokerTimeOffsetConfig]? = nil
+    ) throws {
         let broker = try BrokerSourceId("demo")
         let logical = try LogicalSymbol("EURUSD")
         let mt5 = try MT5Symbol("EURUSD")
@@ -51,13 +93,13 @@ private struct ValidationFixture {
         self.digits = digits
         let config = BrokerTimeConfig(
             brokerSourceId: broker,
-            offsetSegments: [
+            offsetSegments: offsetSegments ?? [
                 BrokerTimeOffsetConfig(
                     validFromMT5ServerTs: MT5ServerSecond(rawValue: 0),
                     validToMT5ServerTs: MT5ServerSecond(rawValue: 2_000_000_000),
                     offsetSeconds: OffsetSeconds(rawValue: 7200),
                     source: .configured,
-                    confidence: .verified
+                    confidence: offsetConfidence
                 )
             ]
         )

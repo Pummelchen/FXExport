@@ -28,8 +28,9 @@ public struct LiveUpdateAgent: Sendable {
         self.logger = logger
     }
 
-    public func runForever() async {
+    public func runForever() async throws {
         logger.info("Starting live updater; scan interval \(config.app.liveScanIntervalSeconds)s")
+        try validateTerminalIdentity()
         while !Task.isCancelled {
             do {
                 try await runOnce()
@@ -48,13 +49,29 @@ public struct LiveUpdateAgent: Sendable {
         let offsetMap = BrokerOffsetMap(config: config.brokerTime)
         let validator = OhlcValidator(timeConverter: TimeConverter(offsetMap: offsetMap))
         let insertBuilder = ClickHouseInsertBuilder(database: config.clickHouse.database)
+        var failureCount = 0
         for mapping in config.symbols.symbols {
-            try await update(mapping: mapping, validator: validator, insertBuilder: insertBuilder)
+            do {
+                try await update(mapping: mapping, validator: validator, insertBuilder: insertBuilder)
+            } catch {
+                failureCount += 1
+                logger.warn("\(mapping.logicalSymbol.rawValue): live update skipped safely: \(error)")
+            }
+        }
+        if failureCount == config.symbols.symbols.count {
+            throw IngestError.invalidChunk("all configured symbols failed during the live update cycle")
         }
     }
 
     private func update(mapping: SymbolMapping, validator: OhlcValidator, insertBuilder: ClickHouseInsertBuilder) async throws {
-        let latestClosed = MT5ServerSecond(rawValue: try bridge.latestClosedM1Bar(mapping.mt5Symbol).mt5ServerTime)
+        let latestResponse = try bridge.latestClosedM1Bar(mapping.mt5Symbol)
+        guard latestResponse.mt5Symbol == mapping.mt5Symbol.rawValue else {
+            throw IngestError.invalidBridgeResponse("expected \(mapping.mt5Symbol.rawValue), got \(latestResponse.mt5Symbol)")
+        }
+        let latestClosed = MT5ServerSecond(rawValue: latestResponse.mt5ServerTime)
+        guard latestClosed.isMinuteAligned else {
+            throw IngestError.invalidBridgeResponse("latest closed M1 timestamp \(latestResponse.mt5ServerTime) is not minute-aligned")
+        }
         guard let state = try await checkpointStore.latestState(
             brokerSourceId: config.brokerTime.brokerSourceId,
             logicalSymbol: mapping.logicalSymbol
@@ -74,6 +91,12 @@ public struct LiveUpdateAgent: Sendable {
             end: toExclusive
         )
         let response = try bridge.ratesRange(mt5Symbol: mapping.mt5Symbol, from: from, toExclusive: toExclusive, maxBars: config.app.chunkSize)
+        guard response.mt5Symbol == mapping.mt5Symbol.rawValue else {
+            throw IngestError.invalidBridgeResponse("expected rates for \(mapping.mt5Symbol.rawValue), got \(response.mt5Symbol)")
+        }
+        guard response.timeframe == Timeframe.m1.rawValue else {
+            throw IngestError.invalidBridgeResponse("expected M1 rates, got \(response.timeframe)")
+        }
         let closedBars = try response.rates.map {
             try $0.toClosedM1Bar(logicalSymbol: mapping.logicalSymbol, mt5Symbol: mapping.mt5Symbol, digits: mapping.digits)
         }
@@ -90,7 +113,9 @@ public struct LiveUpdateAgent: Sendable {
         let validated = try validator.validateBatch(closedBars, context: context)
         guard !validated.isEmpty else { return }
         _ = try await clickHouse.execute(insertBuilder.rawBarsInsert(validated))
+        _ = try await clickHouse.execute(try insertBuilder.canonicalRangeDelete(validated))
         _ = try await clickHouse.execute(insertBuilder.canonicalBarsInsert(validated))
+        try await CanonicalInsertVerifier(clickHouse: clickHouse, insertBuilder: insertBuilder).verify(validated)
         guard let last = validated.last else { return }
         try await checkpointStore.save(IngestState(
             brokerSourceId: config.brokerTime.brokerSourceId,
@@ -104,5 +129,23 @@ public struct LiveUpdateAgent: Sendable {
             updatedAtUtc: now
         ))
         logger.ok("\(mapping.logicalSymbol.rawValue): live update inserted \(validated.count) closed M1 bars")
+    }
+
+    private func validateTerminalIdentity() throws {
+        guard let expected = config.brokerTime.expectedTerminalIdentity, !expected.isEmpty else {
+            logger.warn("No expected MT5 terminal identity configured for broker_source_id \(config.brokerTime.brokerSourceId.rawValue)")
+            return
+        }
+        let actual = try bridge.terminalInfo()
+        if let company = expected.company, company != actual.company {
+            throw IngestError.terminalIdentityMismatch("expected company '\(company)', got '\(actual.company)'")
+        }
+        if let server = expected.server, server != actual.server {
+            throw IngestError.terminalIdentityMismatch("expected server '\(server)', got '\(actual.server)'")
+        }
+        if let accountLogin = expected.accountLogin, accountLogin != actual.accountLogin {
+            throw IngestError.terminalIdentityMismatch("expected account \(accountLogin), got \(actual.accountLogin)")
+        }
+        logger.ok("MT5 terminal identity verified for broker_source_id \(config.brokerTime.brokerSourceId.rawValue)")
     }
 }

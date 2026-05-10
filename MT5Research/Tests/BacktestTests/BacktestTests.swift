@@ -11,7 +11,7 @@ final class BacktestTests: XCTestCase {
         )
         let series = try ColumnarOhlcSeries(
             metadata: metadata,
-            timestamps: [60, 120, 180],
+            utcTimestamps: [60, 120, 180],
             open: [100, 101, 102],
             high: [101, 102, 103],
             low: [99, 100, 101],
@@ -21,6 +21,23 @@ final class BacktestTests: XCTestCase {
         let first = try engine.run(series: series, strategy: NoopStrategy.self, parameters: EmptyStrategyParameters(), execution: ExecutionModel(spreadScaled: 0, commissionScaled: 0))
         let second = try engine.run(series: series, strategy: NoopStrategy.self, parameters: EmptyStrategyParameters(), execution: ExecutionModel(spreadScaled: 0, commissionScaled: 0))
         XCTAssertEqual(first, second)
+    }
+
+    func testCPUBacktestRejectsNonMinuteAlignedUTC() throws {
+        let metadata = BarSeriesMetadata(
+            brokerSourceId: try BrokerSourceId("demo"),
+            logicalSymbol: try LogicalSymbol("EURUSD"),
+            digits: try Digits(5)
+        )
+        let series = try ColumnarOhlcSeries(
+            metadata: metadata,
+            utcTimestamps: [60, 121],
+            open: [100, 101],
+            high: [101, 102],
+            low: [99, 100],
+            close: [100, 102]
+        )
+        XCTAssertThrowsError(try BacktestEngine().validateSeries(series))
     }
 }
 

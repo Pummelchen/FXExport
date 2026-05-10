@@ -29,7 +29,7 @@ let package = Package(
         .testTarget(name: "ValidationTests", dependencies: ["Domain", "Validation", "TimeMapping", "Config"]),
         .testTarget(name: "TimeMappingTests", dependencies: ["Domain", "TimeMapping", "Config"]),
         .testTarget(name: "ProtocolTests", dependencies: ["MT5Bridge", "Domain"]),
-        .testTarget(name: "ClickHouseTests", dependencies: ["ClickHouse"]),
+        .testTarget(name: "ClickHouseTests", dependencies: ["ClickHouse", "Domain"]),
         .testTarget(name: "IngestionTests", dependencies: ["Domain", "Ingestion", "ClickHouse"]),
         .testTarget(name: "VerificationTests", dependencies: ["Domain", "Verification"]),
         .testTarget(name: "BacktestTests", dependencies: ["Domain", "BacktestCore"])

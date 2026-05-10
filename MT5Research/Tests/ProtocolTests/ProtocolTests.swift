@@ -20,9 +20,9 @@ final class ProtocolTests: XCTestCase {
         var parser = FrameParser()
         let bodies = try parser.append(frame)
         var body = bodies[0]
-        let text = String(data: body, encoding: .utf8)!
+        let text = try XCTUnwrap(String(data: body, encoding: .utf8))
         let tampered = text.replacingOccurrences(of: "\"payload\":{}", with: "\"payload\":{\"x\":1}")
-        body = tampered.data(using: .utf8)!
+        body = try XCTUnwrap(tampered.data(using: .utf8))
         XCTAssertThrowsError(try codec.decode(body, payloadType: EmptyPayload.self))
     }
 }

@@ -7,6 +7,7 @@ The implementation is intentionally defensive:
 - MT5 server timestamps and UTC timestamps are different Swift types.
 - Prices are stored as scaled integers, never canonical floating-point values.
 - Raw MT5 timestamps are always preserved.
+- Canonical ingestion requires verified broker UTC offset segments.
 - The current open M1 bar must never be ingested.
 - ClickHouse primary keys are not treated as uniqueness constraints.
 - The CPU backtest engine is the correctness reference.
@@ -92,6 +93,26 @@ UTC = MT5_SERVER_TIME - OFFSET_SECONDS
 
 Do not mark offset data as verified unless you have actually verified the broker offset for that historical segment. The sample file uses an inferred offset only as a starting point.
 
+Canonical rows are rejected unless the matching offset segment has:
+
+```json
+"confidence": "verified"
+```
+
+This is intentional. Brokers can change server timezone policy, daylight-saving behavior, server names, or account routing. A broad inferred offset is useful for planning but is not safe enough for canonical backtesting data.
+
+`expected_terminal_identity` can bind a config to a specific MT5 company/server/account:
+
+```json
+"expected_terminal_identity": {
+  "company": "Broker Ltd",
+  "server": "Broker-Server",
+  "account_login": 12345678
+}
+```
+
+If these values are provided, backfill/live commands verify the connected terminal before ingestion.
+
 ## ClickHouse Migrations
 
 Run:
@@ -111,6 +132,8 @@ This creates:
 - `repair_log`
 
 Raw audit data is append-only. Repairs only target canonical data and must preserve conflicts and repair logs.
+
+Canonical ingestion is replace-by-range for the affected broker/source/symbol range. After the replacement insert, Swift reads the canonical range back from ClickHouse and verifies row count plus unique MT5 and UTC timestamp counts before advancing the checkpoint. This prevents duplicate canonical bars after a crash between insert and checkpoint update. Raw audit rows remain append-only.
 
 ## MT5 EA Setup
 
@@ -162,7 +185,7 @@ Implemented:
 - Deterministic framed JSON protocol.
 - TCP socket transport in Swift.
 - ClickHouse HTTP client and migrations.
-- Backfill/live update scaffolds with checkpoint-after-insert flow.
+- Backfill/live update scaffolds with checkpoint-after-canonical-readback flow and canonical range replacement.
 - Verifier/repair decision scaffolds.
 - CPU backtest scaffold using columnar arrays.
 - Optional Metal availability scaffold.
@@ -171,7 +194,7 @@ Implemented:
 
 Still intentionally scaffolded:
 
-- Typed ClickHouse readback parsing for `ingest_state` and historical range verification.
+- Full typed ClickHouse historical range readback for random MT5-vs-database verification.
 - Full random MT5-vs-ClickHouse repair execution.
 - Strategy loading and real EA-clone backtest logic.
 - Metal compute pipeline execution.

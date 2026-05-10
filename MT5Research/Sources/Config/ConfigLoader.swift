@@ -87,6 +87,9 @@ public struct ConfigLoader: Sendable {
             throw ConfigError.invalidValue("live_scan_interval_seconds must be greater than zero")
         }
         guard !clickHouse.database.isEmpty else { throw ConfigError.invalidValue("ClickHouse database is empty") }
+        guard Self.isSafeClickHouseIdentifier(clickHouse.database) else {
+            throw ConfigError.invalidValue("ClickHouse database must contain only letters, digits, and underscores, and must not start with a digit")
+        }
         guard !mt5Bridge.host.isEmpty else { throw ConfigError.invalidValue("MT5 bridge host is empty") }
         guard !symbols.symbols.isEmpty else { throw ConfigError.invalidValue("No symbols configured") }
 
@@ -94,11 +97,24 @@ public struct ConfigLoader: Sendable {
         guard Set(logicalSymbols).count == logicalSymbols.count else {
             throw ConfigError.invalidValue("Duplicate logical symbols in symbols.json")
         }
+        let mt5Symbols = symbols.symbols.map(\.mt5Symbol)
+        guard Set(mt5Symbols).count == mt5Symbols.count else {
+            throw ConfigError.invalidValue("Duplicate MT5 symbols in symbols.json")
+        }
 
         var sortedSegments = brokerTime.offsetSegments.sorted { $0.validFromMT5ServerTs < $1.validFromMT5ServerTs }
         for segment in sortedSegments {
             guard segment.validFromMT5ServerTs.rawValue < segment.validToMT5ServerTs.rawValue else {
                 throw ConfigError.invalidValue("Broker time offset segment has non-positive duration")
+            }
+            guard segment.validFromMT5ServerTs.isMinuteAligned && segment.validToMT5ServerTs.isMinuteAligned else {
+                throw ConfigError.invalidValue("Broker time offset segment boundaries must be minute-aligned")
+            }
+            guard segment.offsetSeconds.rawValue % 60 == 0 else {
+                throw ConfigError.invalidValue("Broker UTC offset seconds must be minute-aligned")
+            }
+            guard Int64(Int32.min)...Int64(Int32.max) ~= segment.offsetSeconds.rawValue else {
+                throw ConfigError.invalidValue("Broker UTC offset seconds must fit ClickHouse Int32 storage")
             }
         }
         while sortedSegments.count >= 2 {
@@ -107,6 +123,13 @@ public struct ConfigLoader: Sendable {
             guard first.validToMT5ServerTs.rawValue <= second.validFromMT5ServerTs.rawValue else {
                 throw ConfigError.invalidValue("Broker time offset segments overlap")
             }
+        }
+    }
+
+    private static func isSafeClickHouseIdentifier(_ value: String) -> Bool {
+        guard let first = value.first, first == "_" || first.isLetter else { return false }
+        return value.allSatisfy { character in
+            character == "_" || character.isLetter || character.isNumber
         }
     }
 }

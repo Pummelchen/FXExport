@@ -121,7 +121,7 @@ void HandleRequest(const string json)
       return;
    }
 
-   if(StringLen(payload) != expectedLength)
+   if(PayloadByteLength(payload) != expectedLength)
    {
       SendError(requestId, command, "PROTOCOL_ERROR", "Payload length mismatch");
       return;
@@ -359,9 +359,31 @@ void SendEnvelope(const string requestId, const string command, const string pay
    for(int i = 0; i < bodyLength; i++)
       frame[i + 4] = body[i];
 
-   int written = SocketSend(g_socket, frame, (uint)ArraySize(frame));
-   if(written != ArraySize(frame))
-      Print("MT5Research bridge SocketSend incomplete. wrote=", written, " expected=", ArraySize(frame), " error=", GetLastError());
+   SendAll(frame);
+}
+
+bool SendAll(uchar &frame[])
+{
+   int total = ArraySize(frame);
+   int sent = 0;
+   while(sent < total && !IsStopped())
+   {
+      int remaining = total - sent;
+      uchar chunk[];
+      ArrayResize(chunk, remaining);
+      ArrayCopy(chunk, frame, 0, sent, remaining);
+
+      ResetLastError();
+      int written = SocketSend(g_socket, chunk, (uint)remaining);
+      if(written <= 0)
+      {
+         Print("MT5Research bridge SocketSend failed. sent=", sent, " remaining=", remaining, " error=", GetLastError());
+         CloseSocket();
+         return false;
+      }
+      sent += written;
+   }
+   return sent == total;
 }
 
 bool ReadExact(uchar &target[], const int total)

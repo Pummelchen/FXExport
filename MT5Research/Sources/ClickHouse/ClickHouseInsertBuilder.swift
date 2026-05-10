@@ -1,6 +1,23 @@
 import Domain
 import Foundation
 
+public enum ClickHouseInsertError: Error, CustomStringConvertible, Sendable {
+    case mixedCanonicalRange
+    case unsortedCanonicalRange
+    case unsortedCanonicalUTCRange
+
+    public var description: String {
+        switch self {
+        case .mixedCanonicalRange:
+            return "Canonical delete range contains multiple broker/source identities."
+        case .unsortedCanonicalRange:
+            return "Canonical delete range is not sorted by MT5 server timestamp."
+        case .unsortedCanonicalUTCRange:
+            return "Canonical range is not sorted by UTC timestamp."
+        }
+    }
+}
+
 public struct ClickHouseInsertBuilder: Sendable {
     private let database: String
 
@@ -34,6 +51,39 @@ public struct ClickHouseInsertBuilder: Sendable {
         sql += "\n"
         sql += bars.map(rawRow).joined(separator: "\n")
         return ClickHouseQuery.mutation(sql, idempotent: false)
+    }
+
+    public func canonicalRangeDelete(_ bars: [ValidatedBar]) throws -> ClickHouseQuery {
+        let range = try canonicalRangeIdentity(bars)
+        guard let first = range.first, let last = range.last else {
+            return ClickHouseQuery.mutation("SELECT 1", idempotent: true)
+        }
+        let sql = """
+        ALTER TABLE \(database).ohlc_m1_canonical DELETE
+        WHERE broker_source_id = '\(sqlLiteral(first.brokerSourceId.rawValue))'
+          AND logical_symbol = '\(sqlLiteral(first.logicalSymbol.rawValue))'
+          AND mt5_server_ts_raw >= \(first.mt5ServerTime.rawValue)
+          AND mt5_server_ts_raw <= \(last.mt5ServerTime.rawValue)
+        SETTINGS mutations_sync = 1
+        """
+        return ClickHouseQuery.mutation(sql, idempotent: true)
+    }
+
+    public func canonicalRangeIntegrityCheck(_ bars: [ValidatedBar]) throws -> ClickHouseQuery {
+        let range = try canonicalRangeIdentity(bars)
+        guard let first = range.first, let last = range.last else {
+            return .select("SELECT 0, 0, 0 FORMAT TabSeparated")
+        }
+        let sql = """
+        SELECT count(), uniqExact(mt5_server_ts_raw), uniqExact(ts_utc)
+        FROM \(database).ohlc_m1_canonical
+        WHERE broker_source_id = '\(sqlLiteral(first.brokerSourceId.rawValue))'
+          AND logical_symbol = '\(sqlLiteral(first.logicalSymbol.rawValue))'
+          AND ts_utc >= \(first.utcTime.rawValue)
+          AND ts_utc <= \(last.utcTime.rawValue)
+        FORMAT TabSeparated
+        """
+        return .select(sql)
     }
 
     public func ingestStateUpsert(
@@ -92,11 +142,40 @@ public struct ClickHouseInsertBuilder: Sendable {
         ].joined(separator: "\t")
     }
 
+    private func canonicalRangeIdentity(_ bars: [ValidatedBar]) throws -> (first: ValidatedBar?, last: ValidatedBar?) {
+        guard let first = bars.first, let last = bars.last else {
+            return (nil, nil)
+        }
+        var previous = first.mt5ServerTime
+        var previousUTC = first.utcTime
+        for bar in bars.dropFirst() {
+            guard bar.brokerSourceId == first.brokerSourceId,
+                  bar.logicalSymbol == first.logicalSymbol else {
+                throw ClickHouseInsertError.mixedCanonicalRange
+            }
+            guard bar.mt5ServerTime.rawValue > previous.rawValue else {
+                throw ClickHouseInsertError.unsortedCanonicalRange
+            }
+            guard bar.utcTime.rawValue > previousUTC.rawValue else {
+                throw ClickHouseInsertError.unsortedCanonicalUTCRange
+            }
+            previous = bar.mt5ServerTime
+            previousUTC = bar.utcTime
+        }
+        return (first, last)
+    }
+
     private func tsv(_ value: String) -> String {
         value
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\t", with: "\\t")
             .replacingOccurrences(of: "\n", with: "\\n")
             .replacingOccurrences(of: "\r", with: "\\r")
+    }
+
+    private func sqlLiteral(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
     }
 }

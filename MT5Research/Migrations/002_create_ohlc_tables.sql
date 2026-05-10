@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS {database}.mt5_ohlc_m1_raw
     ingested_at_utc Int64
 )
 ENGINE = MergeTree
-PARTITION BY toYYYYMM(toDateTime(ts_utc))
+PARTITION BY toYYYYMM(toDateTime(ts_utc, 'UTC'))
 ORDER BY (broker_source_id, logical_symbol, ts_utc, batch_id);
 
 CREATE TABLE IF NOT EXISTS {database}.ohlc_m1_canonical
@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS {database}.ohlc_m1_canonical
     ingested_at_utc Int64
 )
 ENGINE = MergeTree
-PARTITION BY toYYYYMM(toDateTime(ts_utc))
+PARTITION BY toYYYYMM(toDateTime(ts_utc, 'UTC'))
 ORDER BY (broker_source_id, logical_symbol, ts_utc);
 
 CREATE TABLE IF NOT EXISTS {database}.ohlc_m1_conflicts
@@ -68,5 +68,5 @@ CREATE TABLE IF NOT EXISTS {database}.ohlc_m1_conflicts
     batch_id String
 )
 ENGINE = MergeTree
-PARTITION BY toYYYYMM(toDateTime(ts_utc))
+PARTITION BY toYYYYMM(toDateTime(ts_utc, 'UTC'))
 ORDER BY (broker_source_id, logical_symbol, ts_utc, detected_at_utc);

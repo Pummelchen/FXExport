@@ -34,14 +34,43 @@ public struct BrokerTimeOffsetConfig: Codable, Hashable, Sendable {
 public struct BrokerTimeConfig: Codable, Sendable {
     public let brokerSourceId: BrokerSourceId
     public let offsetSegments: [BrokerTimeOffsetConfig]
+    public let expectedTerminalIdentity: ExpectedTerminalIdentity?
 
     enum CodingKeys: String, CodingKey {
         case brokerSourceId = "broker_source_id"
         case offsetSegments = "offset_segments"
+        case expectedTerminalIdentity = "expected_terminal_identity"
     }
 
-    public init(brokerSourceId: BrokerSourceId, offsetSegments: [BrokerTimeOffsetConfig]) {
+    public init(
+        brokerSourceId: BrokerSourceId,
+        offsetSegments: [BrokerTimeOffsetConfig],
+        expectedTerminalIdentity: ExpectedTerminalIdentity? = nil
+    ) {
         self.brokerSourceId = brokerSourceId
         self.offsetSegments = offsetSegments
+        self.expectedTerminalIdentity = expectedTerminalIdentity
+    }
+}
+
+public struct ExpectedTerminalIdentity: Codable, Hashable, Sendable {
+    public let company: String?
+    public let server: String?
+    public let accountLogin: Int64?
+
+    enum CodingKeys: String, CodingKey {
+        case company
+        case server
+        case accountLogin = "account_login"
+    }
+
+    public init(company: String?, server: String?, accountLogin: Int64?) {
+        self.company = company
+        self.server = server
+        self.accountLogin = accountLogin
+    }
+
+    public var isEmpty: Bool {
+        company == nil && server == nil && accountLogin == nil
     }
 }

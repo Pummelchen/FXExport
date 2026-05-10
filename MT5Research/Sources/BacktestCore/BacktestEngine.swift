@@ -48,9 +48,14 @@ public struct BacktestEngine: Sendable {
               series.count == series.close.count else {
             throw BacktestError.invalidSeries("Column counts changed after construction")
         }
-        for index in 1..<series.timestamps.count {
-            guard series.timestamps[index] > series.timestamps[index - 1] else {
-                throw BacktestError.invalidSeries("Timestamps must be strictly increasing")
+        for timestamp in series.utcTimestamps {
+            guard timestamp % 60 == 0 else {
+                throw BacktestError.invalidSeries("UTC timestamps must be minute-aligned")
+            }
+        }
+        for index in 1..<series.utcTimestamps.count {
+            guard series.utcTimestamps[index] > series.utcTimestamps[index - 1] else {
+                throw BacktestError.invalidSeries("UTC timestamps must be strictly increasing")
             }
         }
     }

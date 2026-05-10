@@ -60,13 +60,10 @@ public struct PriceScaled: RawRepresentable, Codable, Hashable, Sendable, Compar
             throw DomainError.priceScaleOverflow(input)
         }
 
-        let paddedFraction: String
-        if fraction.count >= digits.rawValue {
-            let endIndex = fraction.index(fraction.startIndex, offsetBy: digits.rawValue)
-            paddedFraction = String(fraction[..<endIndex])
-        } else {
-            paddedFraction = fraction + String(repeating: "0", count: digits.rawValue - fraction.count)
+        guard fraction.count <= digits.rawValue else {
+            throw DomainError.invalidPrice(input)
         }
+        let paddedFraction = fraction + String(repeating: "0", count: digits.rawValue - fraction.count)
 
         guard let fractionValue = Int64(paddedFraction.isEmpty ? "0" : paddedFraction) else {
             throw DomainError.invalidPrice(input)
