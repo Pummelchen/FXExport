@@ -16,3 +16,9 @@ cd MT5Research
 swift test
 swift build -c release
 ```
+
+Git safety:
+
+- Local runtime configs under `MT5Research/Config/` stay ignored and are excluded from source archives.
+- The repository hooks block pushes if tracked content contains the local ClickHouse password or personal home-directory paths.
+- Use relative paths in tracked docs, configs, and release notes.

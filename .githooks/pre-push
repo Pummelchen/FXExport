@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+repo_root="$(git rev-parse --show-toplevel)"
+guard="$repo_root/.githooks/secret-path-guard"
+zero_sha="0000000000000000000000000000000000000000"
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  if [ -z "${local_sha:-}" ] || [ "$local_sha" = "$zero_sha" ]; then
+    continue
+  fi
+  "$guard" --ref "$local_sha"
+done

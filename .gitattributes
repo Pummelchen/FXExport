@@ -1,0 +1,5 @@
+MT5Research/Config/** export-ignore
+MT5Research/.build/** export-ignore
+MT5Research/.swiftpm/** export-ignore
+*.ex5 export-ignore
+*.log export-ignore
