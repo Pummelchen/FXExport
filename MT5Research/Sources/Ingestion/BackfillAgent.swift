@@ -44,6 +44,7 @@ public struct BackfillAgent: Sendable {
     private let bridge: MT5BridgeClient
     private let clickHouse: ClickHouseClientProtocol
     private let checkpointStore: CheckpointStore
+    private let offsetStore: BrokerOffsetStore
     private let logger: Logger
 
     public init(
@@ -51,17 +52,19 @@ public struct BackfillAgent: Sendable {
         bridge: MT5BridgeClient,
         clickHouse: ClickHouseClientProtocol,
         checkpointStore: CheckpointStore,
+        offsetStore: BrokerOffsetStore,
         logger: Logger
     ) {
         self.config = config
         self.bridge = bridge
         self.clickHouse = clickHouse
         self.checkpointStore = checkpointStore
+        self.offsetStore = offsetStore
         self.logger = logger
     }
 
     public func run(selectedSymbols: [LogicalSymbol]?) async throws {
-        try validateTerminalIdentity()
+        let terminalIdentity = try loadTerminalIdentity()
         let selected = selectedSymbols.map(Set.init)
         if let selectedSymbols {
             let configured = Set(config.symbols.symbols.map(\.logicalSymbol))
@@ -72,7 +75,11 @@ public struct BackfillAgent: Sendable {
         let mappings = config.symbols.symbols.filter { mapping in
             selected?.contains(mapping.logicalSymbol) ?? true
         }
-        let offsetMap = BrokerOffsetMap(config: config.brokerTime)
+        let offsetMap = try await offsetStore.loadVerifiedOffsetMap(
+            brokerSourceId: config.brokerTime.brokerSourceId,
+            terminalIdentity: terminalIdentity
+        )
+        logger.ok("Loaded \(offsetMap.segments.count) verified broker UTC offset segment(s) from ClickHouse for \(terminalIdentity)")
         let validator = OhlcValidator(timeConverter: TimeConverter(offsetMap: offsetMap))
         let insertBuilder = ClickHouseInsertBuilder(database: config.clickHouse.database)
         let batchBuilder = BatchBuilder(chunkSize: config.app.chunkSize)
@@ -186,7 +193,7 @@ public struct BackfillAgent: Sendable {
         guard !bars.isEmpty else { return }
         _ = try await clickHouse.execute(insertBuilder.rawBarsInsert(bars))
         _ = try await clickHouse.execute(try insertBuilder.canonicalRangeDelete(bars))
-        _ = try await clickHouse.execute(insertBuilder.canonicalBarsInsert(bars))
+        _ = try await clickHouse.execute(try insertBuilder.canonicalBarsInsert(bars))
         try await CanonicalInsertVerifier(clickHouse: clickHouse, insertBuilder: insertBuilder).verify(bars)
     }
 
@@ -208,12 +215,13 @@ public struct BackfillAgent: Sendable {
         }
     }
 
-    private func validateTerminalIdentity() throws {
-        guard let expected = config.brokerTime.expectedTerminalIdentity, !expected.isEmpty else {
-            logger.warn("No expected MT5 terminal identity configured for broker_source_id \(config.brokerTime.brokerSourceId.rawValue)")
-            return
-        }
+    private func loadTerminalIdentity() throws -> BrokerServerIdentity {
         let actual = try bridge.terminalInfo()
+        let identity = try actual.brokerServerIdentity()
+        guard let expected = config.brokerTime.expectedTerminalIdentity, !expected.isEmpty else {
+            logger.warn("No expected MT5 terminal identity configured for broker_source_id \(config.brokerTime.brokerSourceId.rawValue); using actual terminal identity \(identity) for DB-backed offset lookup")
+            return identity
+        }
         if let company = expected.company, company != actual.company {
             throw IngestError.terminalIdentityMismatch("expected company '\(company)', got '\(actual.company)'")
         }
@@ -223,6 +231,7 @@ public struct BackfillAgent: Sendable {
         if let accountLogin = expected.accountLogin, accountLogin != actual.accountLogin {
             throw IngestError.terminalIdentityMismatch("expected account \(accountLogin), got \(actual.accountLogin)")
         }
-        logger.ok("MT5 terminal identity verified for broker_source_id \(config.brokerTime.brokerSourceId.rawValue)")
+        logger.ok("MT5 terminal identity verified for broker_source_id \(config.brokerTime.brokerSourceId.rawValue): \(identity)")
+        return identity
     }
 }

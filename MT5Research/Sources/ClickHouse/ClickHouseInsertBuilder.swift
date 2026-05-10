@@ -5,6 +5,7 @@ public enum ClickHouseInsertError: Error, CustomStringConvertible, Sendable {
     case mixedCanonicalRange
     case unsortedCanonicalRange
     case unsortedCanonicalUTCRange
+    case unverifiedCanonicalBar(MT5ServerSecond, OffsetConfidence)
 
     public var description: String {
         switch self {
@@ -14,6 +15,8 @@ public enum ClickHouseInsertError: Error, CustomStringConvertible, Sendable {
             return "Canonical delete range is not sorted by MT5 server timestamp."
         case .unsortedCanonicalUTCRange:
             return "Canonical range is not sorted by UTC timestamp."
+        case .unverifiedCanonicalBar(let time, let confidence):
+            return "Canonical bar \(time.rawValue) has \(confidence.rawValue) UTC offset confidence."
         }
     }
 }
@@ -39,7 +42,8 @@ public struct ClickHouseInsertBuilder: Sendable {
         return ClickHouseQuery.mutation(sql, idempotent: false)
     }
 
-    public func canonicalBarsInsert(_ bars: [ValidatedBar]) -> ClickHouseQuery {
+    public func canonicalBarsInsert(_ bars: [ValidatedBar]) throws -> ClickHouseQuery {
+        _ = try canonicalRangeIdentity(bars)
         var sql = """
         INSERT INTO \(database).ohlc_m1_canonical (
             broker_source_id, logical_symbol, mt5_symbol, timeframe, mt5_server_ts_raw, ts_utc,
@@ -153,6 +157,9 @@ public struct ClickHouseInsertBuilder: Sendable {
                   bar.logicalSymbol == first.logicalSymbol else {
                 throw ClickHouseInsertError.mixedCanonicalRange
             }
+            guard bar.offsetConfidence == .verified else {
+                throw ClickHouseInsertError.unverifiedCanonicalBar(bar.mt5ServerTime, bar.offsetConfidence)
+            }
             guard bar.mt5ServerTime.rawValue > previous.rawValue else {
                 throw ClickHouseInsertError.unsortedCanonicalRange
             }
@@ -161,6 +168,9 @@ public struct ClickHouseInsertBuilder: Sendable {
             }
             previous = bar.mt5ServerTime
             previousUTC = bar.utcTime
+        }
+        guard first.offsetConfidence == .verified else {
+            throw ClickHouseInsertError.unverifiedCanonicalBar(first.mt5ServerTime, first.offsetConfidence)
         }
         return (first, last)
     }

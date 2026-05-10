@@ -1,4 +1,3 @@
-import Config
 import Domain
 import TimeMapping
 import Validation
@@ -44,17 +43,21 @@ final class ValidationTests: XCTestCase {
 
     func testUTCSequenceMustStayStrictlyIncreasingAcrossOffsetSegments() throws {
         let fixture = try ValidationFixture(offsetSegments: [
-            BrokerTimeOffsetConfig(
-                validFromMT5ServerTs: MT5ServerSecond(rawValue: 0),
-                validToMT5ServerTs: MT5ServerSecond(rawValue: 1_700_007_300),
-                offsetSeconds: OffsetSeconds(rawValue: 0),
+            ValidationFixture.segment(
+                broker: try BrokerSourceId("demo"),
+                identity: try BrokerServerIdentity(company: "Broker", server: "Broker-Demo", accountLogin: 1),
+                from: 0,
+                to: 1_700_007_300,
+                offset: 0,
                 source: .configured,
                 confidence: .verified
             ),
-            BrokerTimeOffsetConfig(
-                validFromMT5ServerTs: MT5ServerSecond(rawValue: 1_700_007_300),
-                validToMT5ServerTs: MT5ServerSecond(rawValue: 2_000_000_000),
-                offsetSeconds: OffsetSeconds(rawValue: 3600),
+            ValidationFixture.segment(
+                broker: try BrokerSourceId("demo"),
+                identity: try BrokerServerIdentity(company: "Broker", server: "Broker-Demo", accountLogin: 1),
+                from: 1_700_007_300,
+                to: 2_000_000_040,
+                offset: 3600,
                 source: .configured,
                 confidence: .verified
             )
@@ -75,35 +78,42 @@ private struct ValidationFixture {
     let logical: LogicalSymbol
     let mt5: MT5Symbol
     let digits: Digits
+    let identity: BrokerServerIdentity
     let validator: OhlcValidator
     let context: OhlcValidationContext
 
     init(
         latestClosed: MT5ServerSecond = MT5ServerSecond(rawValue: 1_700_007_300),
         offsetConfidence: OffsetConfidence = .verified,
-        offsetSegments: [BrokerTimeOffsetConfig]? = nil
+        offsetSegments: [BrokerOffsetSegment]? = nil
     ) throws {
         let broker = try BrokerSourceId("demo")
         let logical = try LogicalSymbol("EURUSD")
         let mt5 = try MT5Symbol("EURUSD")
         let digits = try Digits(5)
+        let identity = try BrokerServerIdentity(company: "Broker", server: "Broker-Demo", accountLogin: 1)
         self.broker = broker
         self.logical = logical
         self.mt5 = mt5
         self.digits = digits
-        let config = BrokerTimeConfig(
+        self.identity = identity
+        let offsetMap = try BrokerOffsetMap(
             brokerSourceId: broker,
-            offsetSegments: offsetSegments ?? [
-                BrokerTimeOffsetConfig(
-                    validFromMT5ServerTs: MT5ServerSecond(rawValue: 0),
-                    validToMT5ServerTs: MT5ServerSecond(rawValue: 2_000_000_000),
-                    offsetSeconds: OffsetSeconds(rawValue: 7200),
+            terminalIdentity: identity,
+            segments: offsetSegments ?? [
+                Self.segment(
+                    broker: broker,
+                    identity: identity,
+                    from: 0,
+                    to: 2_000_000_040,
+                    offset: 7200,
                     source: .configured,
                     confidence: offsetConfidence
                 )
-            ]
+            ],
+            requireVerified: false
         )
-        self.validator = OhlcValidator(timeConverter: TimeConverter(offsetMap: BrokerOffsetMap(config: config)))
+        self.validator = OhlcValidator(timeConverter: TimeConverter(offsetMap: offsetMap))
         self.context = OhlcValidationContext(
             brokerSourceId: broker,
             expectedLogicalSymbol: logical,
@@ -112,6 +122,26 @@ private struct ValidationFixture {
             latestClosedMT5ServerTime: latestClosed,
             batchId: BatchId(rawValue: "batch"),
             ingestedAtUtc: UtcSecond(rawValue: 1_700_000_000)
+        )
+    }
+
+    static func segment(
+        broker: BrokerSourceId,
+        identity: BrokerServerIdentity,
+        from: Int64,
+        to: Int64,
+        offset: Int64,
+        source: OffsetSource,
+        confidence: OffsetConfidence
+    ) -> BrokerOffsetSegment {
+        BrokerOffsetSegment(
+            brokerSourceId: broker,
+            terminalIdentity: identity,
+            validFrom: MT5ServerSecond(rawValue: from),
+            validTo: MT5ServerSecond(rawValue: to),
+            offset: OffsetSeconds(rawValue: offset),
+            source: source,
+            confidence: confidence
         )
     }
 

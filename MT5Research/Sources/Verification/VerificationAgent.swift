@@ -54,14 +54,14 @@ public struct VerificationAgent: Sendable {
             logger.warn("OHLC invariant violations found: \(invariantCount.trimmingCharacters(in: .whitespacesAndNewlines))")
         }
 
-        logger.verify("Running unresolved-time-offset check")
-        let unresolvedCount = try await clickHouse.execute(.select("""
+        logger.verify("Running canonical UTC offset confidence check")
+        let unverifiedCount = try await clickHouse.execute(.select("""
         SELECT count()
         FROM \(config.clickHouse.database).ohlc_m1_canonical
-        WHERE offset_confidence = 'unresolved'
+        WHERE offset_confidence != 'verified'
         """))
-        if unresolvedCount.trimmingCharacters(in: .whitespacesAndNewlines) != "0" {
-            logger.warn("Canonical rows with unresolved offsets found: \(unresolvedCount.trimmingCharacters(in: .whitespacesAndNewlines))")
+        if unverifiedCount.trimmingCharacters(in: .whitespacesAndNewlines) != "0" {
+            logger.warn("Canonical rows with non-verified UTC offsets found: \(unverifiedCount.trimmingCharacters(in: .whitespacesAndNewlines))")
         }
 
         guard bridge != nil else {

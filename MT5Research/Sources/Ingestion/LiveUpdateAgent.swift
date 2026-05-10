@@ -12,6 +12,7 @@ public struct LiveUpdateAgent: Sendable {
     private let bridge: MT5BridgeClient
     private let clickHouse: ClickHouseClientProtocol
     private let checkpointStore: CheckpointStore
+    private let offsetStore: BrokerOffsetStore
     private let logger: Logger
 
     public init(
@@ -19,21 +20,23 @@ public struct LiveUpdateAgent: Sendable {
         bridge: MT5BridgeClient,
         clickHouse: ClickHouseClientProtocol,
         checkpointStore: CheckpointStore,
+        offsetStore: BrokerOffsetStore,
         logger: Logger
     ) {
         self.config = config
         self.bridge = bridge
         self.clickHouse = clickHouse
         self.checkpointStore = checkpointStore
+        self.offsetStore = offsetStore
         self.logger = logger
     }
 
     public func runForever() async throws {
         logger.info("Starting live updater; scan interval \(config.app.liveScanIntervalSeconds)s")
-        try validateTerminalIdentity()
+        let terminalIdentity = try loadTerminalIdentity()
         while !Task.isCancelled {
             do {
-                try await runOnce()
+                try await runOnce(terminalIdentity: terminalIdentity)
             } catch {
                 logger.warn("Live update cycle failed safely: \(error)")
             }
@@ -46,7 +49,14 @@ public struct LiveUpdateAgent: Sendable {
     }
 
     public func runOnce() async throws {
-        let offsetMap = BrokerOffsetMap(config: config.brokerTime)
+        try await runOnce(terminalIdentity: loadTerminalIdentity())
+    }
+
+    private func runOnce(terminalIdentity: BrokerServerIdentity) async throws {
+        let offsetMap = try await offsetStore.loadVerifiedOffsetMap(
+            brokerSourceId: config.brokerTime.brokerSourceId,
+            terminalIdentity: terminalIdentity
+        )
         let validator = OhlcValidator(timeConverter: TimeConverter(offsetMap: offsetMap))
         let insertBuilder = ClickHouseInsertBuilder(database: config.clickHouse.database)
         var failureCount = 0
@@ -114,7 +124,7 @@ public struct LiveUpdateAgent: Sendable {
         guard !validated.isEmpty else { return }
         _ = try await clickHouse.execute(insertBuilder.rawBarsInsert(validated))
         _ = try await clickHouse.execute(try insertBuilder.canonicalRangeDelete(validated))
-        _ = try await clickHouse.execute(insertBuilder.canonicalBarsInsert(validated))
+        _ = try await clickHouse.execute(try insertBuilder.canonicalBarsInsert(validated))
         try await CanonicalInsertVerifier(clickHouse: clickHouse, insertBuilder: insertBuilder).verify(validated)
         guard let last = validated.last else { return }
         try await checkpointStore.save(IngestState(
@@ -131,12 +141,13 @@ public struct LiveUpdateAgent: Sendable {
         logger.ok("\(mapping.logicalSymbol.rawValue): live update inserted \(validated.count) closed M1 bars")
     }
 
-    private func validateTerminalIdentity() throws {
-        guard let expected = config.brokerTime.expectedTerminalIdentity, !expected.isEmpty else {
-            logger.warn("No expected MT5 terminal identity configured for broker_source_id \(config.brokerTime.brokerSourceId.rawValue)")
-            return
-        }
+    private func loadTerminalIdentity() throws -> BrokerServerIdentity {
         let actual = try bridge.terminalInfo()
+        let identity = try actual.brokerServerIdentity()
+        guard let expected = config.brokerTime.expectedTerminalIdentity, !expected.isEmpty else {
+            logger.warn("No expected MT5 terminal identity configured for broker_source_id \(config.brokerTime.brokerSourceId.rawValue); using actual terminal identity \(identity) for DB-backed offset lookup")
+            return identity
+        }
         if let company = expected.company, company != actual.company {
             throw IngestError.terminalIdentityMismatch("expected company '\(company)', got '\(actual.company)'")
         }
@@ -146,6 +157,7 @@ public struct LiveUpdateAgent: Sendable {
         if let accountLogin = expected.accountLogin, accountLogin != actual.accountLogin {
             throw IngestError.terminalIdentityMismatch("expected account \(accountLogin), got \(actual.accountLogin)")
         }
-        logger.ok("MT5 terminal identity verified for broker_source_id \(config.brokerTime.brokerSourceId.rawValue)")
+        logger.ok("MT5 terminal identity verified for broker_source_id \(config.brokerTime.brokerSourceId.rawValue): \(identity)")
+        return identity
     }
 }

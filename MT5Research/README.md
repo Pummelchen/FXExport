@@ -85,21 +85,43 @@ The program does not guess suffixes or prefixes. If your broker uses `EURUSDm`, 
 
 MT5 historical bar timestamps are broker/server time, not automatically UTC.
 
-`Config/broker_time.json` defines offset segments. UTC conversion is:
+`Config/broker_time.json` identifies the configured `broker_source_id` and can optionally pin the expected MT5 terminal identity. It does not provide canonical UTC authority.
+
+Canonical UTC conversion loads active, verified offset segments from ClickHouse table `broker_time_offsets`, filtered by:
+
+- `broker_source_id`
+- `mt5_company`
+- `mt5_server`
+- `mt5_account_login`
+- `confidence = 'verified'`
+- `is_active = 1`
+
+UTC conversion is:
 
 ```text
 UTC = MT5_SERVER_TIME - OFFSET_SECONDS
 ```
 
-Do not mark offset data as verified unless you have actually verified the broker offset for that historical segment. The sample file uses an inferred offset only as a starting point.
+Do not mark offset data as verified unless you have actually verified the broker offset for that exact MT5 company/server/account and historical segment. Inferred or unresolved offsets are allowed to exist in audit state, but canonical ingestion will not load them and canonical insert builders reject non-verified rows.
 
-Canonical rows are rejected unless the matching offset segment has:
+Example verified offset row:
 
-```json
-"confidence": "verified"
+```sql
+INSERT INTO mt5research.broker_time_offsets
+(
+  broker_source_id, mt5_company, mt5_server, mt5_account_login,
+  valid_from_mt5_server_ts, valid_to_mt5_server_ts, offset_seconds,
+  source, confidence, verification_evidence, is_active, created_at_utc
+)
+VALUES
+(
+  'demo-broker-mt5', 'Broker Ltd', 'Broker-Server', 12345678,
+  1672531200, 1688169600, 7200,
+  'manual', 'verified', 'Verified against broker server/GMT snapshot and known DST schedule', 1, 1700000000
+);
 ```
 
-This is intentional. Brokers can change server timezone policy, daylight-saving behavior, server names, or account routing. A broad inferred offset is useful for planning but is not safe enough for canonical backtesting data.
+This strictness is intentional. Brokers can change server timezone policy, daylight-saving behavior, server names, or account routing. A broad inferred offset is useful for planning but is not safe enough for canonical backtesting data.
 
 `expected_terminal_identity` can bind a config to a specific MT5 company/server/account:
 
@@ -111,7 +133,7 @@ This is intentional. Brokers can change server timezone policy, daylight-saving 
 }
 ```
 
-If these values are provided, backfill/live commands verify the connected terminal before ingestion.
+If these values are provided, backfill/live commands verify the connected terminal before ingestion. Even when they are omitted, the actual MT5 terminal identity is still used for the DB-backed offset lookup.
 
 ## ClickHouse Migrations
 
@@ -180,7 +202,7 @@ Implemented:
 - Strong domain types.
 - ANSI terminal logger with `NO_COLOR` support.
 - JSON config loading.
-- Broker offset mapping and explicit UTC conversion.
+- DB-backed verified broker offset authority and explicit UTC conversion.
 - M1 OHLC validation.
 - Deterministic framed JSON protocol.
 - TCP socket transport in Swift.
@@ -207,6 +229,7 @@ This project must preserve these invariants:
 
 - Never ingest the open M1 bar.
 - Never trust MT5 server time as UTC.
+- Never build canonical UTC rows from config-only, inferred, unresolved, or identity-unbound offset segments.
 - Never lose raw MT5 timestamps.
 - Never use floating-point prices as canonical prices.
 - Never advance a checkpoint before successful validated insert.

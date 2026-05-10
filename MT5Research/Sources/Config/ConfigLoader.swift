@@ -92,6 +92,17 @@ public struct ConfigLoader: Sendable {
         }
         guard !mt5Bridge.host.isEmpty else { throw ConfigError.invalidValue("MT5 bridge host is empty") }
         guard !symbols.symbols.isEmpty else { throw ConfigError.invalidValue("No symbols configured") }
+        if let expected = brokerTime.expectedTerminalIdentity {
+            if let company = expected.company, company.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                throw ConfigError.invalidValue("expected_terminal_identity.company must not be empty when provided")
+            }
+            if let server = expected.server, server.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                throw ConfigError.invalidValue("expected_terminal_identity.server must not be empty when provided")
+            }
+            if let accountLogin = expected.accountLogin, accountLogin <= 0 {
+                throw ConfigError.invalidValue("expected_terminal_identity.account_login must be positive when provided")
+            }
+        }
 
         let logicalSymbols = symbols.symbols.map(\.logicalSymbol)
         guard Set(logicalSymbols).count == logicalSymbols.count else {

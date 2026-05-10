@@ -33,6 +33,8 @@ public struct BrokerTimeOffsetConfig: Codable, Hashable, Sendable {
 
 public struct BrokerTimeConfig: Codable, Sendable {
     public let brokerSourceId: BrokerSourceId
+    /// Optional bootstrap/reference segments. Canonical ingestion never trusts this array;
+    /// it loads verified offset authority from ClickHouse `broker_time_offsets`.
     public let offsetSegments: [BrokerTimeOffsetConfig]
     public let expectedTerminalIdentity: ExpectedTerminalIdentity?
 
@@ -50,6 +52,13 @@ public struct BrokerTimeConfig: Codable, Sendable {
         self.brokerSourceId = brokerSourceId
         self.offsetSegments = offsetSegments
         self.expectedTerminalIdentity = expectedTerminalIdentity
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.brokerSourceId = try container.decode(BrokerSourceId.self, forKey: .brokerSourceId)
+        self.offsetSegments = try container.decodeIfPresent([BrokerTimeOffsetConfig].self, forKey: .offsetSegments) ?? []
+        self.expectedTerminalIdentity = try container.decodeIfPresent(ExpectedTerminalIdentity.self, forKey: .expectedTerminalIdentity)
     }
 }
 

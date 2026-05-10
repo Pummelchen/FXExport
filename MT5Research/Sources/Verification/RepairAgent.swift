@@ -41,9 +41,10 @@ public struct RepairAgent: Sendable {
             for bar in replacementBars {
                 guard bar.brokerSourceId == range.brokerSourceId,
                       bar.logicalSymbol == range.logicalSymbol,
+                      bar.offsetConfidence == .verified,
                       bar.mt5ServerTime.rawValue >= range.mt5Start.rawValue,
                       bar.mt5ServerTime.rawValue < range.mt5EndExclusive.rawValue else {
-                    throw RepairError.refused("replacement bars do not match the requested repair range")
+                    throw RepairError.refused("replacement bars do not match the requested repair range or contain non-verified UTC offsets")
                 }
             }
             let brokerSourceId = Self.sqlLiteral(range.brokerSourceId.rawValue)
@@ -58,7 +59,7 @@ public struct RepairAgent: Sendable {
             """
             _ = try await clickHouse.execute(.mutation(deleteSQL, idempotent: true))
             let insertBuilder = ClickHouseInsertBuilder(database: database)
-            _ = try await clickHouse.execute(insertBuilder.canonicalBarsInsert(replacementBars))
+            _ = try await clickHouse.execute(try insertBuilder.canonicalBarsInsert(replacementBars))
             try await CanonicalInsertVerifier(clickHouse: clickHouse, insertBuilder: insertBuilder).verify(replacementBars)
         }
     }

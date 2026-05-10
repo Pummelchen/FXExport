@@ -71,11 +71,13 @@ struct MT5ResearchCLI {
                     insertBuilder: ClickHouseInsertBuilder(database: config.clickHouse.database),
                     database: config.clickHouse.database
                 )
+                let offsetStore = ClickHouseBrokerOffsetStore(client: clickHouse, database: config.clickHouse.database)
                 let agent = BackfillAgent(
                     config: config,
                     bridge: bridge,
                     clickHouse: clickHouse,
                     checkpointStore: checkpointStore,
+                    offsetStore: offsetStore,
                     logger: logger
                 )
                 let symbols = try selectedSymbols(from: options.symbolsArgument)
@@ -89,11 +91,13 @@ struct MT5ResearchCLI {
                     insertBuilder: ClickHouseInsertBuilder(database: config.clickHouse.database),
                     database: config.clickHouse.database
                 )
+                let offsetStore = ClickHouseBrokerOffsetStore(client: clickHouse, database: config.clickHouse.database)
                 try await LiveUpdateAgent(
                     config: config,
                     bridge: bridge,
                     clickHouse: clickHouse,
                     checkpointStore: checkpointStore,
+                    offsetStore: offsetStore,
                     logger: logger
                 ).runForever()
                 return .success

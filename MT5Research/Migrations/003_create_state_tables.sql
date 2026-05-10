@@ -1,15 +1,20 @@
 CREATE TABLE IF NOT EXISTS {database}.broker_time_offsets
 (
     broker_source_id String,
+    mt5_company String,
+    mt5_server String,
+    mt5_account_login Int64,
     valid_from_mt5_server_ts Int64,
     valid_to_mt5_server_ts Int64,
     offset_seconds Int32,
     source LowCardinality(String),
     confidence LowCardinality(String),
+    verification_evidence String,
+    is_active UInt8,
     created_at_utc Int64
 )
 ENGINE = MergeTree
-ORDER BY (broker_source_id, valid_from_mt5_server_ts);
+ORDER BY (broker_source_id, mt5_company, mt5_server, mt5_account_login, valid_from_mt5_server_ts, created_at_utc);
 
 CREATE TABLE IF NOT EXISTS {database}.ingest_state
 (

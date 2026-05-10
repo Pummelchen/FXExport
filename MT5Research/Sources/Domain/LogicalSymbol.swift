@@ -39,6 +39,9 @@ public enum DomainError: Error, Equatable, CustomStringConvertible, Sendable {
     case invalidLogicalSymbol(String)
     case emptyMT5Symbol
     case emptyBrokerSourceId
+    case emptyBrokerCompany
+    case emptyBrokerServer
+    case invalidBrokerAccountLogin(Int64)
     case invalidDigits(Int)
     case invalidPrice(String)
     case priceScaleOverflow(String)
@@ -55,6 +58,12 @@ public enum DomainError: Error, Equatable, CustomStringConvertible, Sendable {
             return "MT5 symbol is empty."
         case .emptyBrokerSourceId:
             return "Broker source id is empty."
+        case .emptyBrokerCompany:
+            return "Broker company is empty."
+        case .emptyBrokerServer:
+            return "Broker server is empty."
+        case .invalidBrokerAccountLogin(let value):
+            return "Broker account login \(value) is invalid."
         case .invalidDigits(let value):
             return "Digits value \(value) is outside the supported range 0...10."
         case .invalidPrice(let value):

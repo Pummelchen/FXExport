@@ -32,6 +32,12 @@ final class ClickHouseTests: XCTestCase {
         XCTAssertThrowsError(try ClickHouseInsertBuilder(database: "db").canonicalRangeDelete([first, duplicate]))
     }
 
+    func testCanonicalRangeDeleteRejectsUnverifiedOffsets() throws {
+        let bar = try makeBar(mt5: 120, utc: 60, offsetConfidence: .inferred)
+        XCTAssertThrowsError(try ClickHouseInsertBuilder(database: "db").canonicalRangeDelete([bar]))
+        XCTAssertThrowsError(try ClickHouseInsertBuilder(database: "db").canonicalBarsInsert([bar]))
+    }
+
     func testCanonicalRangeIntegrityCheckIsBrokerScoped() throws {
         let bars = [try makeBar(mt5: 120, utc: 60), try makeBar(mt5: 180, utc: 120)]
         let query = try ClickHouseInsertBuilder(database: "db").canonicalRangeIntegrityCheck(bars)
@@ -43,7 +49,12 @@ final class ClickHouseTests: XCTestCase {
         XCTAssertTrue(query.sql.contains("uniqExact(ts_utc)"))
     }
 
-    private func makeBar(mt5: Int64, utc: Int64, logicalSymbol: String = "EURUSD") throws -> ValidatedBar {
+    private func makeBar(
+        mt5: Int64,
+        utc: Int64,
+        logicalSymbol: String = "EURUSD",
+        offsetConfidence: OffsetConfidence = .verified
+    ) throws -> ValidatedBar {
         let broker = try BrokerSourceId("demo")
         let logical = try LogicalSymbol(logicalSymbol)
         let mt5Symbol = try MT5Symbol(logicalSymbol)
@@ -58,7 +69,7 @@ final class ClickHouseTests: XCTestCase {
             utcTime: UtcSecond(rawValue: utc),
             serverUtcOffset: OffsetSeconds(rawValue: 60),
             offsetSource: .configured,
-            offsetConfidence: .verified,
+            offsetConfidence: offsetConfidence,
             open: open,
             high: open,
             low: open,

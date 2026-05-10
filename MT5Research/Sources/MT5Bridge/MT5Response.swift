@@ -25,6 +25,10 @@ public struct TerminalInfoDTO: Codable, Sendable {
         case server
         case accountLogin = "account_login"
     }
+
+    public func brokerServerIdentity() throws -> BrokerServerIdentity {
+        try BrokerServerIdentity(company: company, server: server, accountLogin: accountLogin)
+    }
 }
 
 public struct SymbolInfoDTO: Codable, Sendable {
