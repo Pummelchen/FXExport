@@ -1,0 +1,7 @@
+{
+  "mode": "listen",
+  "host": "127.0.0.1",
+  "port": 5055,
+  "connectTimeoutSeconds": 30,
+  "requestTimeoutSeconds": 30
+}

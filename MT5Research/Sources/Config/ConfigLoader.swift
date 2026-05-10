@@ -1,0 +1,112 @@
+import AppCore
+import Domain
+import Foundation
+
+public struct ConfigBundle: Sendable {
+    public let app: AppConfigFile
+    public let clickHouse: ClickHouseConfig
+    public let mt5Bridge: MT5BridgeConfig
+    public let brokerTime: BrokerTimeConfig
+    public let symbols: SymbolConfig
+
+    public init(
+        app: AppConfigFile,
+        clickHouse: ClickHouseConfig,
+        mt5Bridge: MT5BridgeConfig,
+        brokerTime: BrokerTimeConfig,
+        symbols: SymbolConfig
+    ) {
+        self.app = app
+        self.clickHouse = clickHouse
+        self.mt5Bridge = mt5Bridge
+        self.brokerTime = brokerTime
+        self.symbols = symbols
+    }
+}
+
+public enum ConfigError: Error, CustomStringConvertible, Sendable {
+    case missingFile(URL)
+    case invalidFile(URL, String)
+    case invalidValue(String)
+
+    public var description: String {
+        switch self {
+        case .missingFile(let url):
+            return "Missing config file: \(url.path)"
+        case .invalidFile(let url, let reason):
+            return "Invalid config file \(url.path): \(reason)"
+        case .invalidValue(let reason):
+            return "Invalid config value: \(reason)"
+        }
+    }
+}
+
+public struct ConfigLoader: Sendable {
+    private let decoder: JSONDecoder
+
+    public init() {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .useDefaultKeys
+        self.decoder = decoder
+    }
+
+    public func loadBundle(configDirectory: URL) throws -> ConfigBundle {
+        let app: AppConfigFile = try load("app.json", from: configDirectory)
+        let clickHouse: ClickHouseConfig = try load("clickhouse.json", from: configDirectory)
+        let mt5Bridge: MT5BridgeConfig = try load("mt5_bridge.json", from: configDirectory)
+        let brokerTime: BrokerTimeConfig = try load("broker_time.json", from: configDirectory)
+        let symbols: SymbolConfig = try load("symbols.json", from: configDirectory)
+        try validate(app: app, clickHouse: clickHouse, mt5Bridge: mt5Bridge, brokerTime: brokerTime, symbols: symbols)
+        return ConfigBundle(app: app, clickHouse: clickHouse, mt5Bridge: mt5Bridge, brokerTime: brokerTime, symbols: symbols)
+    }
+
+    public func load<T: Decodable>(_ fileName: String, from directory: URL) throws -> T {
+        let url = directory.appendingPathComponent(fileName)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw ConfigError.missingFile(url)
+        }
+        do {
+            let data = try Data(contentsOf: url)
+            return try decoder.decode(T.self, from: data)
+        } catch let error as ConfigError {
+            throw error
+        } catch {
+            throw ConfigError.invalidFile(url, error.localizedDescription)
+        }
+    }
+
+    private func validate(
+        app: AppConfigFile,
+        clickHouse: ClickHouseConfig,
+        mt5Bridge: MT5BridgeConfig,
+        brokerTime: BrokerTimeConfig,
+        symbols: SymbolConfig
+    ) throws {
+        guard app.chunkSize > 0 else { throw ConfigError.invalidValue("chunk_size must be greater than zero") }
+        guard app.liveScanIntervalSeconds > 0 else {
+            throw ConfigError.invalidValue("live_scan_interval_seconds must be greater than zero")
+        }
+        guard !clickHouse.database.isEmpty else { throw ConfigError.invalidValue("ClickHouse database is empty") }
+        guard !mt5Bridge.host.isEmpty else { throw ConfigError.invalidValue("MT5 bridge host is empty") }
+        guard !symbols.symbols.isEmpty else { throw ConfigError.invalidValue("No symbols configured") }
+
+        let logicalSymbols = symbols.symbols.map(\.logicalSymbol)
+        guard Set(logicalSymbols).count == logicalSymbols.count else {
+            throw ConfigError.invalidValue("Duplicate logical symbols in symbols.json")
+        }
+
+        var sortedSegments = brokerTime.offsetSegments.sorted { $0.validFromMT5ServerTs < $1.validFromMT5ServerTs }
+        for segment in sortedSegments {
+            guard segment.validFromMT5ServerTs.rawValue < segment.validToMT5ServerTs.rawValue else {
+                throw ConfigError.invalidValue("Broker time offset segment has non-positive duration")
+            }
+        }
+        while sortedSegments.count >= 2 {
+            let first = sortedSegments.removeFirst()
+            let second = sortedSegments[0]
+            guard first.validToMT5ServerTs.rawValue <= second.validFromMT5ServerTs.rawValue else {
+                throw ConfigError.invalidValue("Broker time offset segments overlap")
+            }
+        }
+    }
+}

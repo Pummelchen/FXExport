@@ -1,0 +1,30 @@
+{
+  "symbols": [
+    { "logical_symbol": "EURAUD", "mt5_symbol": "EURAUD", "digits": 5 },
+    { "logical_symbol": "EURCAD", "mt5_symbol": "EURCAD", "digits": 5 },
+    { "logical_symbol": "EURCHF", "mt5_symbol": "EURCHF", "digits": 5 },
+    { "logical_symbol": "EURDKK", "mt5_symbol": "EURDKK", "digits": 5 },
+    { "logical_symbol": "EURGBP", "mt5_symbol": "EURGBP", "digits": 5 },
+    { "logical_symbol": "EURJPY", "mt5_symbol": "EURJPY", "digits": 3 },
+    { "logical_symbol": "EURNOK", "mt5_symbol": "EURNOK", "digits": 5 },
+    { "logical_symbol": "EURNZD", "mt5_symbol": "EURNZD", "digits": 5 },
+    { "logical_symbol": "EURPLN", "mt5_symbol": "EURPLN", "digits": 5 },
+    { "logical_symbol": "EURSEK", "mt5_symbol": "EURSEK", "digits": 5 },
+    { "logical_symbol": "EURSGD", "mt5_symbol": "EURSGD", "digits": 5 },
+    { "logical_symbol": "EURUSD", "mt5_symbol": "EURUSD", "digits": 5 },
+    { "logical_symbol": "EURZAR", "mt5_symbol": "EURZAR", "digits": 5 },
+    { "logical_symbol": "USDCAD", "mt5_symbol": "USDCAD", "digits": 5 },
+    { "logical_symbol": "USDCHF", "mt5_symbol": "USDCHF", "digits": 5 },
+    { "logical_symbol": "USDCZK", "mt5_symbol": "USDCZK", "digits": 5 },
+    { "logical_symbol": "USDDKK", "mt5_symbol": "USDDKK", "digits": 5 },
+    { "logical_symbol": "USDHUF", "mt5_symbol": "USDHUF", "digits": 3 },
+    { "logical_symbol": "USDJPY", "mt5_symbol": "USDJPY", "digits": 3 },
+    { "logical_symbol": "USDMXN", "mt5_symbol": "USDMXN", "digits": 5 },
+    { "logical_symbol": "USDNOK", "mt5_symbol": "USDNOK", "digits": 5 },
+    { "logical_symbol": "USDPLN", "mt5_symbol": "USDPLN", "digits": 5 },
+    { "logical_symbol": "USDSEK", "mt5_symbol": "USDSEK", "digits": 5 },
+    { "logical_symbol": "USDSGD", "mt5_symbol": "USDSGD", "digits": 5 },
+    { "logical_symbol": "USDTHB", "mt5_symbol": "USDTHB", "digits": 3 },
+    { "logical_symbol": "USDZAR", "mt5_symbol": "USDZAR", "digits": 5 }
+  ]
+}

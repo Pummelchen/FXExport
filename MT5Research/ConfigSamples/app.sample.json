@@ -1,0 +1,7 @@
+{
+  "chunk_size": 50000,
+  "live_scan_interval_seconds": 10,
+  "log_level": "normal",
+  "strict_symbol_failures": false,
+  "verifier_random_ranges": 1
+}

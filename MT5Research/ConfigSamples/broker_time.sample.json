@@ -1,0 +1,12 @@
+{
+  "broker_source_id": "demo-broker-mt5",
+  "offset_segments": [
+    {
+      "valid_from_mt5_server_ts": 0,
+      "valid_to_mt5_server_ts": 4102444800,
+      "offset_seconds": 7200,
+      "source": "configured",
+      "confidence": "inferred"
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+.DS_Store
+
+# SwiftPM build and editor state
+MT5Research/.build/
+MT5Research/.swiftpm/
+MT5Research/Package.resolved
+
+# Local runtime config copied from samples
+MT5Research/Config/
+
+# MT5 compiled artifacts and logs
+*.ex5
+*.log
+
+# Xcode/macOS local output
+DerivedData/
+*.xcuserstate
