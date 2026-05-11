@@ -67,13 +67,72 @@ public struct RepairAgent: Sendable {
               )
             SETTINGS mutations_sync = 1
             """
-            _ = try await clickHouse.execute(.mutation(deleteSQL, idempotent: true))
-            _ = try await clickHouse.execute(insertQuery)
-            try await CanonicalInsertVerifier(clickHouse: clickHouse, insertBuilder: insertBuilder).verify(replacementBars)
+            do {
+                _ = try await clickHouse.execute(.mutation(deleteSQL, idempotent: true))
+                _ = try await clickHouse.execute(insertQuery)
+                try await CanonicalInsertVerifier(clickHouse: clickHouse, insertBuilder: insertBuilder).verify(replacementBars)
+                try await writeRepairLog(
+                    range: range,
+                    decision: "repair_canonical_only",
+                    outcome: "success",
+                    details: reason,
+                    batchId: first.batchId
+                )
+            } catch {
+                let repairError = error
+                do {
+                    try await writeRepairLog(
+                        range: range,
+                        decision: "repair_canonical_only",
+                        outcome: "failed",
+                        details: String(describing: repairError),
+                        batchId: first.batchId
+                    )
+                } catch {
+                    logger.warn("\(range.logicalSymbol.rawValue): failed to write repair_log failure row: \(error)")
+                }
+                throw repairError
+            }
         }
+    }
+
+    private func writeRepairLog(
+        range: VerificationRange,
+        decision: String,
+        outcome: String,
+        details: String,
+        batchId: BatchId
+    ) async throws {
+        let row = [
+            Self.tsv(range.brokerSourceId.rawValue),
+            Self.tsv(range.logicalSymbol.rawValue),
+            String(range.mt5Start.rawValue),
+            String(range.mt5EndExclusive.rawValue),
+            Self.tsv(decision),
+            Self.tsv(outcome),
+            Self.tsv(details),
+            Self.tsv(batchId.rawValue),
+            String(Int64(Date().timeIntervalSince1970))
+        ].joined(separator: "\t")
+        let sql = """
+        INSERT INTO \(database).repair_log (
+            broker_source_id, logical_symbol, range_start_mt5_server_ts,
+            range_end_mt5_server_ts, decision, outcome, details, batch_id, created_at_utc
+        ) FORMAT TabSeparated
+        \(row)
+        """
+        _ = try await clickHouse.execute(.mutation(sql, idempotent: false))
     }
 
     private static func sqlLiteral(_ value: String) -> String {
         value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
+    }
+
+    private static func tsv(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\t", with: "\\t")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "\\r")
     }
 }

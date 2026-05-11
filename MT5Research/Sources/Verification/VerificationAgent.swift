@@ -3,6 +3,7 @@ import ClickHouse
 import Config
 import Domain
 import Foundation
+import Ingestion
 import MT5Bridge
 import TimeMapping
 import Validation
@@ -57,11 +58,60 @@ public struct VerificationAgent: Sendable {
             logger.verify("Random historical cross-check disabled for this run")
             return
         }
-        guard bridge != nil else {
+        guard let bridge else {
             logger.warn("Random MT5 cross-check skipped because no MT5 bridge connection is active")
             return
         }
-        logger.verify("Random historical cross-check scaffold ready for \(randomRanges) range(s)")
-        // TODO: wire typed ClickHouse range decoding, then compare with MT5 source bars using VerificationComparator.
+        let terminal = try bridge.terminalInfo()
+        let terminalIdentity = try TerminalIdentityPolicy().resolve(
+            actual: terminal,
+            brokerSourceId: config.brokerTime.brokerSourceId,
+            expected: config.brokerTime.expectedTerminalIdentity,
+            logger: logger
+        )
+        let offsetStore = ClickHouseBrokerOffsetStore(client: clickHouse, database: config.clickHouse.database)
+        let offsetMap = try await offsetStore.loadVerifiedOffsetMap(
+            brokerSourceId: config.brokerTime.brokerSourceId,
+            terminalIdentity: terminalIdentity
+        )
+        try BrokerOffsetRuntimeVerifier().verify(
+            snapshot: bridge.serverTimeSnapshot(),
+            offsetMap: offsetMap,
+            acceptedLiveOffsetSeconds: config.brokerTime.acceptedLiveOffsetSeconds,
+            logger: logger
+        )
+        let verifier = HistoricalRangeVerifier(
+            config: config,
+            bridge: bridge,
+            clickHouse: clickHouse,
+            offsetMap: offsetMap,
+            logger: logger
+        )
+        let checkpointStore = ClickHouseCheckpointStore(
+            client: clickHouse,
+            insertBuilder: ClickHouseInsertBuilder(database: config.clickHouse.database),
+            database: config.clickHouse.database
+        )
+        var generator = SystemRandomNumberGenerator()
+        let selector = RandomRangeSelector()
+        for index in 1...randomRanges {
+            guard let mapping = config.symbols.symbols.randomElement(using: &generator) else { return }
+            guard let state = try await checkpointStore.latestState(
+                brokerSourceId: config.brokerTime.brokerSourceId,
+                logicalSymbol: mapping.logicalSymbol
+            ) else {
+                logger.warn("\(mapping.logicalSymbol.rawValue): random verification skipped because no checkpoint exists")
+                continue
+            }
+            let range = try selector.selectMonth(
+                brokerSourceId: config.brokerTime.brokerSourceId,
+                logicalSymbol: mapping.logicalSymbol,
+                oldest: state.oldestMT5ServerTime,
+                latestClosed: state.latestIngestedClosedMT5ServerTime,
+                random: &generator
+            )
+            logger.verify("Random MT5 cross-check \(index)/\(randomRanges): \(range.logicalSymbol.rawValue) \(range.mt5Start.rawValue)..<\(range.mt5EndExclusive.rawValue)")
+            _ = try await verifier.verify(range: range)
+        }
     }
 }

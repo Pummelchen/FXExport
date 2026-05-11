@@ -23,12 +23,12 @@ public struct VerificationRange: Hashable, Sendable {
 public struct RandomRangeSelector: Sendable {
     public init() {}
 
-    public func selectMonth(
+    public func selectMonth<R: RandomNumberGenerator>(
         brokerSourceId: BrokerSourceId,
         logicalSymbol: LogicalSymbol,
         oldest: MT5ServerSecond,
         latestClosed: MT5ServerSecond,
-        random: inout any RandomNumberGenerator
+        random: inout R
     ) throws -> VerificationRange {
         let monthSeconds: Int64 = 31 * 24 * 60 * 60
         guard latestClosed.rawValue - oldest.rawValue > monthSeconds else {

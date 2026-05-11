@@ -29,7 +29,7 @@ The system has two parts:
    - Listens for or connects to the MT5 bridge.
    - Validates and converts MT5 data.
    - Writes raw audit rows and canonical OHLC rows to ClickHouse.
-   - Runs backfill, live updates, verification scaffolds, repair scaffolds, and backtest scaffolds.
+   - Runs backfill, live updates, MT5 cross-check verification, canonical-only repair, and backtest scaffolds.
 
 Important MT5 socket note: standard MQL5 sockets are client-oriented. The sample EA therefore connects to the Swift listener. The Swift transport also supports outbound client mode for future bridge variants.
 
@@ -72,14 +72,14 @@ swift build -c release
 .build/release/mt5research migrate --config-dir Config --migrations-dir Migrations
 ```
 
-5. Insert active, verified broker UTC offset rows into `broker_time_offsets` for the exact MT5 company/server/account you will use.
-6. Start the Swift listener:
+5. Start the Swift listener. `bridge-check` waits for the EA, prints the terminal identity, and automatically verifies the live broker server UTC offset from the EA snapshot against the audited ClickHouse offset authority:
 
 ```bash
 .build/release/mt5research bridge-check --config-dir Config
 ```
 
-7. Attach `HistoryBridgeEA.mq5` in MT5 and confirm `bridge-check` succeeds.
+6. Attach `HistoryBridgeEA.mq5` in MT5 if it is not already running, then confirm `bridge-check` succeeds.
+7. If `bridge-check` reports missing `broker_time_offsets`, insert active, verified historical offset authority for the exact MT5 company/server/account shown by the EA. Do not calculate the current live offset by hand; `bridge-check`, `backfill`, `live`, and MT5-backed `verify` check the live offset automatically through the EA.
 8. Confirm symbol mappings and broker digits:
 
 ```bash
@@ -166,7 +166,7 @@ INSERT INTO mt5research.broker_time_offsets
 )
 VALUES
 (
-  'demo-broker-mt5', 'Broker Ltd', 'Broker-Server', 12345678,
+  'icmarkets-sc-mt5-4', 'REPLACE_WITH_BRIDGE_CHECK_COMPANY', 'ICMarketsSC-MT5-4', 12345678,
   1672531200, 1688169600, 7200,
   'manual', 'verified', 'Verified against broker server/GMT snapshot and known DST schedule', 1, 1700000000
 );
@@ -184,7 +184,9 @@ This strictness is intentional. Brokers can change server timezone policy, dayli
 }
 ```
 
-If these values are provided, backfill/live commands verify the connected terminal before ingestion. Even when they are omitted, the actual MT5 terminal identity is still used for the DB-backed offset lookup.
+For IC Markets server `ICMarketsSC-MT5-4`, the sample config uses `broker_source_id = "icmarkets-sc-mt5-4"`, pins the expected server name, and accepts only live offsets `7200` and `10800` seconds. IC Markets documents that its MT4/MT5 server time is GMT+2 or GMT+3 when daylight saving is in effect ([trading hours](https://www.icmarkets.com/global/en/trading-pricing/trading-hours/)), and its 2026 notice says the server changed from GMT+2 to GMT+3 on 2026-03-08 ([2026 server time notice](https://www.icmarkets.com.au/blog/us-daylight-savings-server-time-changing-to-gmt3-2026/)).
+
+If `expected_terminal_identity` values are provided, `bridge-check`, `backfill`, `live`, `verify`, and `repair` verify the connected terminal before using DB-backed offset authority. Even when optional fields are omitted, the actual MT5 terminal identity is still used for the DB-backed offset lookup.
 
 ## ClickHouse Migrations
 
@@ -267,6 +269,8 @@ Global options:
 --debug
 ```
 
+`repair --from` and `--to` are UTC dates in `YYYY-MM-DD` format. Repair first verifies the requested range against MT5, repairs canonical rows only when the mismatch is unambiguous and UTC mapping is verified, writes `repair_log`, and then verifies the range again. Raw audit rows are never deleted.
+
 ## Current Implementation Status
 
 Implemented:
@@ -280,8 +284,9 @@ Implemented:
 - Deterministic framed JSON protocol.
 - TCP socket transport in Swift.
 - ClickHouse HTTP client and migrations.
-- Backfill/live update scaffolds with checkpoint-after-canonical-readback flow and canonical range replacement.
-- Verifier/repair decision scaffolds.
+- Backfill/live update agents with checkpoint-after-canonical-readback flow and canonical range replacement.
+- Startup verifier checks plus random historical MT5-vs-ClickHouse range comparison.
+- Canonical-only repair command with verify -> repair -> reverify flow.
 - CPU backtest scaffold using columnar arrays.
 - Optional Metal availability scaffold.
 - MQL5 EA bridge skeleton.
@@ -289,8 +294,7 @@ Implemented:
 
 Still intentionally scaffolded:
 
-- Full typed ClickHouse historical range readback for random MT5-vs-database verification.
-- Full random MT5-vs-ClickHouse repair execution.
+- Export-cache command.
 - Strategy loading and real EA-clone backtest logic.
 - Metal compute pipeline execution.
 

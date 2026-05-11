@@ -1,6 +1,7 @@
 import ClickHouse
 import Domain
 import Ingestion
+import MT5Bridge
 import XCTest
 
 final class IngestionTests: XCTestCase {
@@ -72,6 +73,17 @@ final class IngestionTests: XCTestCase {
                 return
             }
         }
+    }
+
+    func testRuntimeOffsetVerifierRoundsSnapshotOffset() throws {
+        let snapshot = ServerTimeSnapshotDTO(timeTradeServer: 1_700_010_803, timeGMT: 1_700_000_000, timeLocal: 1)
+        let observed = try BrokerOffsetRuntimeVerifier.observedOffset(from: snapshot)
+        XCTAssertEqual(observed, OffsetSeconds(rawValue: 10_800))
+    }
+
+    func testRuntimeOffsetVerifierRejectsImpossibleSnapshotOffset() {
+        let snapshot = ServerTimeSnapshotDTO(timeTradeServer: 1_700_200_000, timeGMT: 1_700_000_000, timeLocal: 1)
+        XCTAssertThrowsError(try BrokerOffsetRuntimeVerifier.observedOffset(from: snapshot))
     }
 
     func testBrokerOffsetStoreLoadsVerifiedIdentityBoundRows() async throws {

@@ -37,21 +37,25 @@ public struct BrokerTimeConfig: Codable, Sendable {
     /// it loads verified offset authority from ClickHouse `broker_time_offsets`.
     public let offsetSegments: [BrokerTimeOffsetConfig]
     public let expectedTerminalIdentity: ExpectedTerminalIdentity?
+    public let acceptedLiveOffsetSeconds: [OffsetSeconds]
 
     enum CodingKeys: String, CodingKey {
         case brokerSourceId = "broker_source_id"
         case offsetSegments = "offset_segments"
         case expectedTerminalIdentity = "expected_terminal_identity"
+        case acceptedLiveOffsetSeconds = "accepted_live_offset_seconds"
     }
 
     public init(
         brokerSourceId: BrokerSourceId,
         offsetSegments: [BrokerTimeOffsetConfig],
-        expectedTerminalIdentity: ExpectedTerminalIdentity? = nil
+        expectedTerminalIdentity: ExpectedTerminalIdentity? = nil,
+        acceptedLiveOffsetSeconds: [OffsetSeconds] = []
     ) {
         self.brokerSourceId = brokerSourceId
         self.offsetSegments = offsetSegments
         self.expectedTerminalIdentity = expectedTerminalIdentity
+        self.acceptedLiveOffsetSeconds = acceptedLiveOffsetSeconds
     }
 
     public init(from decoder: Decoder) throws {
@@ -59,6 +63,7 @@ public struct BrokerTimeConfig: Codable, Sendable {
         self.brokerSourceId = try container.decode(BrokerSourceId.self, forKey: .brokerSourceId)
         self.offsetSegments = try container.decodeIfPresent([BrokerTimeOffsetConfig].self, forKey: .offsetSegments) ?? []
         self.expectedTerminalIdentity = try container.decodeIfPresent(ExpectedTerminalIdentity.self, forKey: .expectedTerminalIdentity)
+        self.acceptedLiveOffsetSeconds = try container.decodeIfPresent([OffsetSeconds].self, forKey: .acceptedLiveOffsetSeconds) ?? []
     }
 }
 

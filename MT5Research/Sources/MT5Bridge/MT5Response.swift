@@ -65,6 +65,12 @@ public struct ServerTimeSnapshotDTO: Codable, Sendable {
         case timeGMT = "time_gmt"
         case timeLocal = "time_local"
     }
+
+    public init(timeTradeServer: Int64, timeGMT: Int64, timeLocal: Int64) {
+        self.timeTradeServer = timeTradeServer
+        self.timeGMT = timeGMT
+        self.timeLocal = timeLocal
+    }
 }
 
 public struct MT5RateDTO: Codable, Sendable {

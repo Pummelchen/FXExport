@@ -7,6 +7,7 @@ import Foundation
 import Ingestion
 import MetalAccel
 import MT5Bridge
+import TimeMapping
 import Verification
 
 @main
@@ -44,6 +45,13 @@ struct MT5ResearchCLI {
                 logger.ok("MT5 bridge connected: \(hello.bridgeName) \(hello.bridgeVersion)")
                 let terminal = try bridge.terminalInfo()
                 logger.ok("MT5 terminal: \(terminal.terminalName), server \(terminal.server), account \(terminal.accountLogin)")
+                _ = try await verifyLiveBrokerOffset(
+                    bridge: bridge,
+                    clickHouse: clickHouse,
+                    config: config,
+                    terminal: terminal,
+                    logger: logger
+                )
                 return .success
 
             case .symbolCheck:
@@ -114,7 +122,7 @@ struct MT5ResearchCLI {
                 return .success
 
             case .repair:
-                logger.warn("Repair CLI is scaffolded. Use verifier output to implement a precise canonical-only range repair command.")
+                try await runRepair(options: options, config: config, clickHouse: clickHouse, logger: logger)
                 return .success
 
             case .exportCache:
@@ -145,6 +153,15 @@ struct MT5ResearchCLI {
             return .usage
         } catch let error as ConfigError {
             print("[ERROR] \(error.description)")
+            return .configuration
+        } catch let error as TerminalIdentityPolicyError {
+            print("[ERROR] \(error.description)")
+            return .configuration
+        } catch let error as BrokerOffsetRuntimeError {
+            print("[ERROR] Broker UTC offset: \(error.description)")
+            return .configuration
+        } catch let error as TimeMappingError {
+            print("[ERROR] Broker UTC offset: \(error.description)")
             return .configuration
         } catch let error as MT5BridgeError {
             print("[ERROR] MT5 bridge: \(error.description)")
@@ -180,6 +197,120 @@ struct MT5ResearchCLI {
     private static func selectedSymbols(from argument: String?) throws -> [LogicalSymbol]? {
         guard let argument, argument.lowercased() != "all" else { return nil }
         return try argument.split(separator: ",").map { try LogicalSymbol(String($0)) }
+    }
+
+    private static func verifyLiveBrokerOffset(
+        bridge: MT5BridgeClient,
+        clickHouse: ClickHouseClientProtocol,
+        config: ConfigBundle,
+        terminal: TerminalInfoDTO,
+        logger: Logger
+    ) async throws -> BrokerOffsetMap {
+        let terminalIdentity = try TerminalIdentityPolicy().resolve(
+            actual: terminal,
+            brokerSourceId: config.brokerTime.brokerSourceId,
+            expected: config.brokerTime.expectedTerminalIdentity,
+            logger: logger
+        )
+        let offsetMap = try await ClickHouseBrokerOffsetStore(
+            client: clickHouse,
+            database: config.clickHouse.database
+        ).loadVerifiedOffsetMap(
+            brokerSourceId: config.brokerTime.brokerSourceId,
+            terminalIdentity: terminalIdentity
+        )
+        logger.ok("Loaded \(offsetMap.segments.count) verified broker UTC offset segment(s) from ClickHouse for \(terminalIdentity)")
+        try BrokerOffsetRuntimeVerifier().verify(
+            snapshot: bridge.serverTimeSnapshot(),
+            offsetMap: offsetMap,
+            acceptedLiveOffsetSeconds: config.brokerTime.acceptedLiveOffsetSeconds,
+            logger: logger
+        )
+        return offsetMap
+    }
+
+    private static func runRepair(
+        options: CLIOptions,
+        config: ConfigBundle,
+        clickHouse: ClickHouseClientProtocol,
+        logger: Logger
+    ) async throws {
+        guard let symbol = options.repairSymbol else {
+            throw CLIError.missingValue("--symbol")
+        }
+        guard let from = options.fromUtcDay else {
+            throw CLIError.missingValue("--from")
+        }
+        guard let to = options.toUtcDay else {
+            throw CLIError.missingValue("--to")
+        }
+        guard config.symbols.mapping(for: symbol) != nil else {
+            throw CLIError.invalidValue("--symbol")
+        }
+
+        let bridge = try connectBridge(config: config, logger: logger)
+        let terminal = try bridge.terminalInfo()
+        let offsetMap = try await verifyLiveBrokerOffset(
+            bridge: bridge,
+            clickHouse: clickHouse,
+            config: config,
+            terminal: terminal,
+            logger: logger
+        )
+        let ranges = try RepairRangePlanner().mt5Ranges(
+            brokerSourceId: config.brokerTime.brokerSourceId,
+            logicalSymbol: symbol,
+            utcStart: from,
+            utcEndExclusive: to,
+            offsetMap: offsetMap
+        )
+        let verifier = HistoricalRangeVerifier(
+            config: config,
+            bridge: bridge,
+            clickHouse: clickHouse,
+            offsetMap: offsetMap,
+            logger: logger
+        )
+        let repairAgent = RepairAgent(
+            clickHouse: clickHouse,
+            database: config.clickHouse.database,
+            logger: logger
+        )
+        let policy = RepairPolicy()
+        for range in ranges {
+            let outcome = try await verifier.verify(range: range)
+            let decision = policy.decide(
+                verification: outcome.result,
+                mt5Available: !outcome.mt5Bars.isEmpty,
+                utcMappingAmbiguous: false
+            )
+            try await repairAgent.repairCanonicalRange(
+                range: range,
+                replacementBars: outcome.mt5Bars,
+                decision: decision
+            )
+            if case .noRepairNeeded = decision {
+                continue
+            } else {
+                let recheck = try await verifier.verify(range: range)
+                guard recheck.result.isClean else {
+                    throw RepairError.refused("post-repair verification still reports \(recheck.result.mismatches.count) mismatch(es)")
+                }
+            }
+        }
+        logger.ok("\(symbol.rawValue): repair command completed for UTC range \(from.rawValue)..<\(to.rawValue)")
+    }
+
+    fileprivate static func parseUtcDay(_ value: String) throws -> UtcSecond {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyy-MM-dd"
+        guard let date = formatter.date(from: value) else {
+            throw CLIError.invalidValue(value)
+        }
+        return UtcSecond(rawValue: Int64(date.timeIntervalSince1970))
     }
 
     private static func printUsage() {
@@ -230,6 +361,9 @@ struct CLIOptions {
     let overrideLogLevel: LogLevel?
     let symbolsArgument: String?
     let randomRanges: Int?
+    let repairSymbol: LogicalSymbol?
+    let fromUtcDay: UtcSecond?
+    let toUtcDay: UtcSecond?
     let requiresBridge: Bool
 
     init(arguments: [String]) throws {
@@ -240,6 +374,9 @@ struct CLIOptions {
             self.overrideLogLevel = nil
             self.symbolsArgument = nil
             self.randomRanges = nil
+            self.repairSymbol = nil
+            self.fromUtcDay = nil
+            self.toUtcDay = nil
             self.requiresBridge = false
             return
         }
@@ -250,6 +387,9 @@ struct CLIOptions {
         var overrideLogLevel: LogLevel?
         var symbolsArgument: String?
         var randomRanges: Int?
+        var repairSymbol: LogicalSymbol?
+        var fromUtcDay: UtcSecond?
+        var toUtcDay: UtcSecond?
         var requiresBridge = command == .verify
         var noBridgeRequested = false
 
@@ -275,13 +415,25 @@ struct CLIOptions {
                     throw CLIError.invalidValue(arg)
                 }
                 randomRanges = value
+            case "--symbol":
+                index += 1
+                guard index < arguments.count else { throw CLIError.missingValue(arg) }
+                repairSymbol = try LogicalSymbol(arguments[index])
+            case "--from":
+                index += 1
+                guard index < arguments.count else { throw CLIError.missingValue(arg) }
+                fromUtcDay = try MT5ResearchCLI.parseUtcDay(arguments[index])
+            case "--to":
+                index += 1
+                guard index < arguments.count else { throw CLIError.missingValue(arg) }
+                toUtcDay = try MT5ResearchCLI.parseUtcDay(arguments[index])
             case "--no-bridge":
                 noBridgeRequested = true
             case "--verbose":
                 overrideLogLevel = .verbose
             case "--debug":
                 overrideLogLevel = .debug
-            case "--config", "--symbol", "--from", "--to":
+            case "--config":
                 index += 1
                 guard index < arguments.count else { throw CLIError.missingValue(arg) }
             default:
@@ -293,12 +445,18 @@ struct CLIOptions {
         if command == .verify {
             requiresBridge = !noBridgeRequested && (randomRanges.map { $0 > 0 } ?? true)
         }
+        if command == .repair, let fromUtcDay, let toUtcDay, fromUtcDay.rawValue >= toUtcDay.rawValue {
+            throw CLIError.invalidValue("--from/--to")
+        }
 
         self.configDirectory = configDirectory
         self.migrationsDirectory = migrationsDirectory
         self.overrideLogLevel = overrideLogLevel
         self.symbolsArgument = symbolsArgument
         self.randomRanges = randomRanges
+        self.repairSymbol = repairSymbol
+        self.fromUtcDay = fromUtcDay
+        self.toUtcDay = toUtcDay
         self.requiresBridge = requiresBridge
     }
 

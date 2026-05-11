@@ -1,5 +1,5 @@
 {
-  "broker_source_id": "demo-broker-mt5",
+  "broker_source_id": "icmarkets-sc-mt5-4",
   "logical_symbol": "EURUSD",
   "from_utc": 1577836800,
   "to_utc": 1735689600,

@@ -23,15 +23,15 @@ let package = Package(
         .target(name: "MetalAccel", dependencies: ["Domain", "BacktestCore"]),
         .executableTarget(
             name: "MT5ResearchCLI",
-            dependencies: ["AppCore", "Config", "MT5Bridge", "ClickHouse", "Ingestion", "Verification", "BacktestCore", "MetalAccel"]
+            dependencies: ["AppCore", "Config", "MT5Bridge", "ClickHouse", "Ingestion", "Verification", "BacktestCore", "MetalAccel", "TimeMapping"]
         ),
         .testTarget(name: "DomainTests", dependencies: ["Domain"]),
         .testTarget(name: "ValidationTests", dependencies: ["Domain", "Validation", "TimeMapping", "Config"]),
         .testTarget(name: "TimeMappingTests", dependencies: ["Domain", "TimeMapping"]),
         .testTarget(name: "ProtocolTests", dependencies: ["MT5Bridge", "Domain"]),
         .testTarget(name: "ClickHouseTests", dependencies: ["ClickHouse", "Domain"]),
-        .testTarget(name: "IngestionTests", dependencies: ["Domain", "Ingestion", "ClickHouse"]),
-        .testTarget(name: "VerificationTests", dependencies: ["Domain", "Verification"]),
+        .testTarget(name: "IngestionTests", dependencies: ["Domain", "Ingestion", "ClickHouse", "MT5Bridge", "TimeMapping"]),
+        .testTarget(name: "VerificationTests", dependencies: ["Domain", "Verification", "TimeMapping"]),
         .testTarget(name: "BacktestTests", dependencies: ["Domain", "BacktestCore"])
     ],
     swiftLanguageModes: [.v6]

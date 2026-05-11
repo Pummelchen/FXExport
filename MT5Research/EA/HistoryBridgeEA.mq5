@@ -415,14 +415,25 @@ bool SendAll(uchar &frame[])
 bool ReadExact(uchar &target[], const int total)
 {
    int received = 0;
+   uint started = GetTickCount();
+   uint timeout = ReadTimeoutMs;
+   if(timeout < 1000)
+      timeout = 1000;
+
    while(received < total)
    {
       uchar chunk[];
       int remaining = total - received;
       ArrayResize(chunk, remaining);
-      int count = SocketRead(g_socket, chunk, (uint)remaining, ReadTimeoutMs);
+      ResetLastError();
+      int count = SocketRead(g_socket, chunk, (uint)remaining, 50);
       if(count <= 0)
-         return false;
+      {
+         if((uint)(GetTickCount() - started) >= timeout)
+            return false;
+         Sleep(1);
+         continue;
+      }
       for(int i = 0; i < count; i++)
          target[received + i] = chunk[i];
       received += count;

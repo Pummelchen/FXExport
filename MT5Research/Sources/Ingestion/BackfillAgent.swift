@@ -86,6 +86,12 @@ public struct BackfillAgent: Sendable {
             terminalIdentity: terminalIdentity
         )
         logger.ok("Loaded \(offsetMap.segments.count) verified broker UTC offset segment(s) from ClickHouse for \(terminalIdentity)")
+        try BrokerOffsetRuntimeVerifier().verify(
+            snapshot: bridge.serverTimeSnapshot(),
+            offsetMap: offsetMap,
+            acceptedLiveOffsetSeconds: config.brokerTime.acceptedLiveOffsetSeconds,
+            logger: logger
+        )
         let validator = OhlcValidator(timeConverter: TimeConverter(offsetMap: offsetMap))
         let insertBuilder = ClickHouseInsertBuilder(database: config.clickHouse.database)
         let batchBuilder = BatchBuilder(chunkSize: config.app.chunkSize)
@@ -245,21 +251,15 @@ public struct BackfillAgent: Sendable {
 
     private func loadTerminalIdentity() throws -> BrokerServerIdentity {
         let actual = try bridge.terminalInfo()
-        let identity = try actual.brokerServerIdentity()
-        guard let expected = config.brokerTime.expectedTerminalIdentity, !expected.isEmpty else {
-            logger.warn("No expected MT5 terminal identity configured for broker_source_id \(config.brokerTime.brokerSourceId.rawValue); using actual terminal identity \(identity) for DB-backed offset lookup")
-            return identity
+        do {
+            return try TerminalIdentityPolicy().resolve(
+                actual: actual,
+                brokerSourceId: config.brokerTime.brokerSourceId,
+                expected: config.brokerTime.expectedTerminalIdentity,
+                logger: logger
+            )
+        } catch let error as TerminalIdentityPolicyError {
+            throw IngestError.terminalIdentityMismatch(error.description)
         }
-        if let company = expected.company, company != actual.company {
-            throw IngestError.terminalIdentityMismatch("expected company '\(company)', got '\(actual.company)'")
-        }
-        if let server = expected.server, server != actual.server {
-            throw IngestError.terminalIdentityMismatch("expected server '\(server)', got '\(actual.server)'")
-        }
-        if let accountLogin = expected.accountLogin, accountLogin != actual.accountLogin {
-            throw IngestError.terminalIdentityMismatch("expected account \(accountLogin), got \(actual.accountLogin)")
-        }
-        logger.ok("MT5 terminal identity verified for broker_source_id \(config.brokerTime.brokerSourceId.rawValue): \(identity)")
-        return identity
     }
 }

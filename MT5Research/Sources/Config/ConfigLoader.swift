@@ -118,6 +118,14 @@ public struct ConfigLoader: Sendable {
                 throw ConfigError.invalidValue("expected_terminal_identity.account_login must be positive when provided")
             }
         }
+        for offset in brokerTime.acceptedLiveOffsetSeconds {
+            guard offset.rawValue % 60 == 0 else {
+                throw ConfigError.invalidValue("accepted_live_offset_seconds values must be minute-aligned")
+            }
+            guard Int64(Int32.min)...Int64(Int32.max) ~= offset.rawValue else {
+                throw ConfigError.invalidValue("accepted_live_offset_seconds values must fit ClickHouse Int32 storage")
+            }
+        }
 
         let logicalSymbols = symbols.symbols.map(\.logicalSymbol)
         guard Set(logicalSymbols).count == logicalSymbols.count else {
