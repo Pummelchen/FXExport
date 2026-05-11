@@ -12,7 +12,7 @@ public struct HistoryImportProductionAgent: ProductionAgent {
             kind: .historyImporter,
             intervalSeconds: intervalSeconds,
             requiresMT5Bridge: enabled,
-            runOnStart: true,
+            runOnStart: enabled,
             runOnlyOnce: true
         )
     }

@@ -12,6 +12,21 @@ public enum ProductionAgentKind: String, CaseIterable, Sendable {
     case checkpointGapAuditor = "checkpoint_gap_auditor"
     case backupReadiness = "backup_readiness"
     case alerting = "alerting"
+
+    public var priorityRank: Int {
+        switch self {
+        case .supervisorCoordinator: return 10
+        case .healthMonitor: return 20
+        case .utcTimeAuthority: return 30
+        case .symbolMetadataDrift: return 40
+        case .historyImporter: return 50
+        case .liveM1Updater: return 60
+        case .databaseVerifierRepairer: return 70
+        case .checkpointGapAuditor: return 80
+        case .backupReadiness: return 90
+        case .alerting: return 100
+        }
+    }
 }
 
 public enum AgentStatus: String, Sendable {

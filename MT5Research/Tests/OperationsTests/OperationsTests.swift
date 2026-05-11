@@ -57,6 +57,78 @@ final class OperationsTests: XCTestCase {
         XCTAssertEqual(laterDue, [.liveM1Updater])
     }
 
+    func testAgentSchedulerSortsByPriority() {
+        let backup = StubAgent(descriptor: AgentDescriptor(kind: .backupReadiness, intervalSeconds: 60, requiresMT5Bridge: false))
+        let health = StubAgent(descriptor: AgentDescriptor(kind: .healthMonitor, intervalSeconds: 60, requiresMT5Bridge: false))
+        let utc = StubAgent(descriptor: AgentDescriptor(kind: .utcTimeAuthority, intervalSeconds: 60, requiresMT5Bridge: true))
+        var scheduler = AgentScheduler()
+
+        let due = scheduler.dueAgents(
+            from: [backup, utc, health],
+            now: Date(timeIntervalSince1970: 1_700_000_000)
+        ).map(\.descriptor.kind)
+
+        XCTAssertEqual(due, [.healthMonitor, .utcTimeAuthority, .backupReadiness])
+    }
+
+    func testAgentSchedulerDeferredAgentRetriesAfterShortDelay() {
+        let verifier = StubAgent(descriptor: AgentDescriptor(kind: .databaseVerifierRepairer, intervalSeconds: 3600, requiresMT5Bridge: false))
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        var scheduler = AgentScheduler()
+
+        scheduler.markDeferred(.databaseVerifierRepairer, at: now, retryAfterSeconds: 10)
+
+        XCTAssertTrue(scheduler.dueAgents(from: [verifier], now: now.addingTimeInterval(9)).isEmpty)
+        XCTAssertEqual(
+            scheduler.dueAgents(from: [verifier], now: now.addingTimeInterval(11)).map(\.descriptor.kind),
+            [.databaseVerifierRepairer]
+        )
+    }
+
+    func testDisabledHistoryImporterDoesNotSupersedeLiveStartup() throws {
+        let config = try makeConfig()
+        let agents = ProductionAgentFactory().makeAgents(config: config, runBackfillOnStart: false)
+        var scheduler = AgentScheduler()
+
+        let due = scheduler.dueAgents(
+            from: agents,
+            now: Date(timeIntervalSince1970: 1_700_000_000)
+        ).map(\.descriptor.kind)
+
+        XCTAssertFalse(due.contains(.historyImporter))
+        XCTAssertTrue(due.contains(.liveM1Updater))
+    }
+
+    func testEnabledHistoryImporterUsesCheckpointAuditRetryInterval() throws {
+        let config = try makeConfig()
+        let agents = ProductionAgentFactory().makeAgents(config: config, runBackfillOnStart: true)
+        let importer = try XCTUnwrap(agents.first { $0.descriptor.kind == .historyImporter })
+
+        XCTAssertEqual(importer.descriptor.intervalSeconds, config.app.supervisor.checkpointAuditIntervalSeconds)
+    }
+
+    func testAgentExecutionPolicySupersedesConflictingAgents() {
+        let policy = AgentExecutionPolicy()
+        let staticBlocked = policy.staticSupersedence(for: [.historyImporter, .liveM1Updater, .databaseVerifierRepairer, .backupReadiness])
+        XCTAssertEqual(staticBlocked[.liveM1Updater], "history_importer owns first-run/resume canonical writes this cycle")
+        XCTAssertEqual(staticBlocked[.databaseVerifierRepairer], "history_importer owns first-run/resume canonical writes this cycle")
+        XCTAssertEqual(staticBlocked[.backupReadiness], "history_importer owns first-run/resume canonical writes this cycle")
+
+        let outcome = AgentOutcome(
+            agent: .utcTimeAuthority,
+            status: .failed,
+            severity: .error,
+            message: "offset mismatch",
+            startedAtUtc: UtcSecond(rawValue: 1),
+            finishedAtUtc: UtcSecond(rawValue: 2),
+            durationMilliseconds: 1
+        )
+        let dynamicBlocked = policy.dynamicSupersedence(after: outcome)
+        XCTAssertTrue(dynamicBlocked.keys.contains(.historyImporter))
+        XCTAssertTrue(dynamicBlocked.keys.contains(.liveM1Updater))
+        XCTAssertTrue(dynamicBlocked.keys.contains(.databaseVerifierRepairer))
+    }
+
     func testInMemoryAgentEventStoreRecordsOutcomes() async throws {
         let store = InMemoryAgentEventStore()
         let broker = try BrokerSourceId("unit-test")
@@ -154,6 +226,73 @@ final class OperationsTests: XCTestCase {
 
         XCTAssertEqual(gaps, ["120..<240"])
     }
+
+    func testBacktestReadinessGatePassesWhenDataAndAgentsAreClean() async throws {
+        let config = try makeConfig()
+        let clickHouse = BacktestGateClickHouse(mode: .clean)
+        let gate = BacktestReadinessGate(config: config, clickHouse: clickHouse)
+
+        try await gate.assertReady(BacktestReadinessRequest(
+            brokerSourceId: config.brokerTime.brokerSourceId,
+            logicalSymbol: try LogicalSymbol("EURUSD"),
+            utcStart: UtcSecond(rawValue: 60),
+            utcEndExclusive: UtcSecond(rawValue: 120)
+        ))
+    }
+
+    func testBacktestReadinessGateBlocksInterruptedBackfill() async throws {
+        let config = try makeConfig()
+        let clickHouse = BacktestGateClickHouse(mode: .interruptedBackfill)
+        let gate = BacktestReadinessGate(config: config, clickHouse: clickHouse)
+
+        await XCTAssertThrowsErrorAsync(try await gate.assertReady(BacktestReadinessRequest(
+            brokerSourceId: config.brokerTime.brokerSourceId,
+            logicalSymbol: try LogicalSymbol("EURUSD"),
+            utcStart: UtcSecond(rawValue: 60),
+            utcEndExclusive: UtcSecond(rawValue: 120)
+        ))) { error in
+            guard case BacktestReadinessError.incompleteIngest = error else {
+                XCTFail("Expected incompleteIngest, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testBacktestReadinessGateBlocksFailedAgentState() async throws {
+        let config = try makeConfig()
+        let clickHouse = BacktestGateClickHouse(mode: .failedAgentState)
+        let gate = BacktestReadinessGate(config: config, clickHouse: clickHouse)
+
+        await XCTAssertThrowsErrorAsync(try await gate.assertReady(BacktestReadinessRequest(
+            brokerSourceId: config.brokerTime.brokerSourceId,
+            logicalSymbol: try LogicalSymbol("EURUSD"),
+            utcStart: UtcSecond(rawValue: 60),
+            utcEndExclusive: UtcSecond(rawValue: 120)
+        ))) { error in
+            guard case BacktestReadinessError.blockingAgentState = error else {
+                XCTFail("Expected blockingAgentState, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testBacktestReadinessGateBlocksMissingRequiredAgentState() async throws {
+        let config = try makeConfig()
+        let clickHouse = BacktestGateClickHouse(mode: .missingRequiredAgentState)
+        let gate = BacktestReadinessGate(config: config, clickHouse: clickHouse)
+
+        await XCTAssertThrowsErrorAsync(try await gate.assertReady(BacktestReadinessRequest(
+            brokerSourceId: config.brokerTime.brokerSourceId,
+            logicalSymbol: try LogicalSymbol("EURUSD"),
+            utcStart: UtcSecond(rawValue: 60),
+            utcEndExclusive: UtcSecond(rawValue: 120)
+        ))) { error in
+            guard case BacktestReadinessError.missingRequiredAgentState = error else {
+                XCTFail("Expected missingRequiredAgentState, got \(error)")
+                return
+            }
+        }
+    }
 }
 
 private struct StubAgent: ProductionAgent {
@@ -178,5 +317,105 @@ private actor RecordingClickHouse: ClickHouseClientProtocol {
             return selectBodies.isEmpty ? "" : selectBodies.removeFirst()
         }
         return ""
+    }
+}
+
+private enum BacktestGateMode {
+    case clean
+    case interruptedBackfill
+    case failedAgentState
+    case missingRequiredAgentState
+}
+
+private actor BacktestGateClickHouse: ClickHouseClientProtocol {
+    private let mode: BacktestGateMode
+
+    init(mode: BacktestGateMode) {
+        self.mode = mode
+    }
+
+    func execute(_ query: ClickHouseQuery) async throws -> String {
+        let sql = query.sql
+        if sql.contains("FROM db.ingest_state") {
+            let status = mode == .interruptedBackfill && sql.contains("logical_symbol = 'EURUSD'") ? "backfilling" : "live"
+            if sql.contains("logical_symbol = 'EURUSD'") {
+                return "demo\tEURUSD\tEURUSD\t0\t180\t180\t\(status)\tbatch\t200\n"
+            }
+            if sql.contains("logical_symbol = 'USDJPY'") {
+                return "demo\tUSDJPY\tUSDJPY\t0\t180\t180\tlive\tbatch\t200\n"
+            }
+            return ""
+        }
+        if sql.contains("runtime_agent_state") {
+            if sql.contains("status IN") {
+                return mode == .failedAgentState ? "database_verifier_repairer\tfailed\tverification mismatch\n" : ""
+            }
+            guard mode != .missingRequiredAgentState else { return "" }
+            let now = Int64(Date().timeIntervalSince1970)
+            return """
+            utc_time_authority\t\(now)
+            symbol_metadata_drift\t\(now)
+            live_m1_updater\t\(now)
+            database_verifier_repairer\t\(now)
+            checkpoint_gap_auditor\t\(now)
+
+            """
+        }
+        if sql.contains("ohlc_m1_canonical") && sql.contains("ts_utc >= 60") && sql.contains("ts_utc < 120") {
+            return "10\n"
+        }
+        return "0\n"
+    }
+}
+
+private func makeConfig() throws -> ConfigBundle {
+    let appData = """
+    {
+      "chunk_size": 50000,
+      "live_scan_interval_seconds": 10,
+      "log_level": "normal",
+      "strict_symbol_failures": false,
+      "verifier_random_ranges": 0
+    }
+    """.data(using: .utf8)!
+    return ConfigBundle(
+        app: try JSONDecoder().decode(AppConfigFile.self, from: appData),
+        clickHouse: ClickHouseConfig(
+            url: URL(string: "http://localhost:8123")!,
+            database: "db",
+            username: nil,
+            password: nil,
+            requestTimeoutSeconds: 10,
+            retryCount: 0
+        ),
+        mt5Bridge: MT5BridgeConfig(
+            mode: .listen,
+            host: "127.0.0.1",
+            port: 5055,
+            connectTimeoutSeconds: 10,
+            requestTimeoutSeconds: 10
+        ),
+        brokerTime: BrokerTimeConfig(
+            brokerSourceId: try BrokerSourceId("demo"),
+            offsetSegments: []
+        ),
+        symbols: SymbolConfig(symbols: [
+            SymbolMapping(logicalSymbol: try LogicalSymbol("EURUSD"), mt5Symbol: try MT5Symbol("EURUSD"), digits: try Digits(5)),
+            SymbolMapping(logicalSymbol: try LogicalSymbol("USDJPY"), mt5Symbol: try MT5Symbol("USDJPY"), digits: try Digits(3))
+        ])
+    )
+}
+
+private func XCTAssertThrowsErrorAsync<T>(
+    _ expression: @autoclosure () async throws -> T,
+    file: StaticString = #filePath,
+    line: UInt = #line,
+    _ errorHandler: (Error) -> Void = { _ in }
+) async {
+    do {
+        _ = try await expression()
+        XCTFail("Expected async expression to throw", file: file, line: line)
+    } catch {
+        errorHandler(error)
     }
 }

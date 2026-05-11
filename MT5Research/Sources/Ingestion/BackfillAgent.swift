@@ -199,7 +199,7 @@ public struct BackfillAgent: Sendable {
                 oldestMT5ServerTime: oldest,
                 latestIngestedClosedMT5ServerTime: last.mt5ServerTime,
                 latestIngestedClosedUtcTime: last.utcTime,
-                status: .backfilling,
+                status: last.mt5ServerTime.rawValue >= latestClosed.rawValue ? .live : .backfilling,
                 lastBatchId: batchId,
                 updatedAtUtc: now
             )

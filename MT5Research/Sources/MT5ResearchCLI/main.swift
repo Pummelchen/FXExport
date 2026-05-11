@@ -78,6 +78,11 @@ struct MT5ResearchCLI {
                 return failureCount == 0 ? .success : .validation
 
             case .backfill:
+                let lock = try SupervisorLock.acquireRuntime(
+                    brokerSourceId: config.brokerTime.brokerSourceId.rawValue,
+                    owner: "backfill"
+                )
+                logger.ok("Broker runtime lock acquired: \(lock.path)")
                 let bridge = try connectBridge(config: config, logger: logger)
                 let checkpointStore = ClickHouseCheckpointStore(
                     client: clickHouse,
@@ -95,9 +100,15 @@ struct MT5ResearchCLI {
                 )
                 let symbols = try selectedSymbols(from: options.symbolsArgument)
                 try await agent.run(selectedSymbols: symbols)
+                _ = lock
                 return .success
 
             case .live:
+                let lock = try SupervisorLock.acquireRuntime(
+                    brokerSourceId: config.brokerTime.brokerSourceId.rawValue,
+                    owner: "live"
+                )
+                logger.ok("Broker runtime lock acquired: \(lock.path)")
                 let bridge = try connectBridge(config: config, logger: logger)
                 let checkpointStore = ClickHouseCheckpointStore(
                     client: clickHouse,
@@ -113,13 +124,15 @@ struct MT5ResearchCLI {
                     offsetStore: offsetStore,
                     logger: logger
                 ).runForever()
+                _ = lock
                 return .success
 
             case .supervise:
-                let lock = try SupervisorLock.acquireDefault(
-                    brokerSourceId: config.brokerTime.brokerSourceId.rawValue
+                let lock = try SupervisorLock.acquireRuntime(
+                    brokerSourceId: config.brokerTime.brokerSourceId.rawValue,
+                    owner: "supervise"
                 )
-                logger.ok("Supervisor lock acquired: \(lock.path)")
+                logger.ok("Broker runtime lock acquired: \(lock.path)")
                 let eventStore = ClickHouseAgentEventStore(
                     clickHouse: clickHouse,
                     database: config.clickHouse.database
@@ -183,6 +196,10 @@ struct MT5ResearchCLI {
                 guard FileManager.default.fileExists(atPath: commandConfigPath.path) else {
                     throw CLIError.invalidValue("--config")
                 }
+                let backtestConfig = try loadBacktestConfig(commandConfigPath)
+                try await BacktestReadinessGate(config: config, clickHouse: clickHouse)
+                    .assertReady(BacktestReadinessRequest(config: backtestConfig))
+                logger.ok("Backtest data-readiness gate passed for \(backtestConfig.logicalSymbol.rawValue)")
                 let availability = MetalAvailability()
                 if availability.isAvailable {
                     logger.ok("Metal available: \(availability.deviceName ?? "unknown device")")
@@ -199,6 +216,10 @@ struct MT5ResearchCLI {
                 guard FileManager.default.fileExists(atPath: commandConfigPath.path) else {
                     throw CLIError.invalidValue("--config")
                 }
+                let backtestConfig = try loadBacktestConfig(commandConfigPath)
+                try await BacktestReadinessGate(config: config, clickHouse: clickHouse)
+                    .assertReady(BacktestReadinessRequest(config: backtestConfig))
+                logger.ok("Optimization data-readiness gate passed for \(backtestConfig.logicalSymbol.rawValue)")
                 logger.warn("Optimize CLI scaffold is ready; CPU reference and optional Metal sweep hooks are in place. Config: \(commandConfigPath.path)")
                 return .success
 
@@ -220,8 +241,11 @@ struct MT5ResearchCLI {
             print("[ERROR] Broker UTC offset: \(error.description)")
             return .configuration
         } catch let error as SupervisorError {
-            print("[ERROR] Supervisor: \(error.description)")
+            print("[ERROR] Runtime lock: \(error.description)")
             return .configuration
+        } catch let error as BacktestReadinessError {
+            print("[ERROR] Backtest readiness: \(error.description)")
+            return .backtest
         } catch let error as TimeMappingError {
             print("[ERROR] Broker UTC offset: \(error.description)")
             return .configuration
@@ -264,6 +288,15 @@ struct MT5ResearchCLI {
     private static func selectedSymbols(from argument: String?) throws -> [LogicalSymbol]? {
         guard let argument, argument.lowercased() != "all" else { return nil }
         return try argument.split(separator: ",").map { try LogicalSymbol(String($0)) }
+    }
+
+    private static func loadBacktestConfig(_ url: URL) throws -> BacktestConfigFile {
+        do {
+            let data = try Data(contentsOf: url)
+            return try JSONDecoder().decode(BacktestConfigFile.self, from: data)
+        } catch {
+            throw ConfigError.invalidFile(url, error.localizedDescription)
+        }
     }
 
     private static func verifyLiveBrokerOffset(
@@ -315,6 +348,11 @@ struct MT5ResearchCLI {
             throw CLIError.invalidValue("--symbol")
         }
 
+        let lock = try SupervisorLock.acquireRuntime(
+            brokerSourceId: config.brokerTime.brokerSourceId.rawValue,
+            owner: "repair"
+        )
+        logger.ok("Broker runtime lock acquired: \(lock.path)")
         let bridge = try connectBridge(config: config, logger: logger)
         let terminal = try bridge.terminalInfo()
         let offsetMap = try await verifyLiveBrokerOffset(
@@ -366,6 +404,7 @@ struct MT5ResearchCLI {
             }
         }
         logger.ok("\(symbol.rawValue): repair command completed for UTC range \(from.rawValue)..<\(to.rawValue)")
+        _ = lock
     }
 
     fileprivate static func parseUtcDay(_ value: String) throws -> UtcSecond {

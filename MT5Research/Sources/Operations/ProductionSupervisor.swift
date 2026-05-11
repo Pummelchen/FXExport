@@ -36,7 +36,9 @@ public struct ProductionSupervisor: Sendable {
             runBackfillOnStart: runBackfillOnStart
         )
         var scheduler = AgentScheduler()
+        let executionPolicy = AgentExecutionPolicy()
         var bridge: MT5BridgeClient?
+        var persistentBlocksBySource: [ProductionAgentKind: [ProductionAgentKind: String]] = [:]
         let supervisorStarted = utcNow()
         var cycle = 0
 
@@ -49,18 +51,37 @@ public struct ProductionSupervisor: Sendable {
             if dueAgents.isEmpty {
                 logger.debug("Supervisor cycle \(cycle): no agents due")
             }
+            let staticBlocks = executionPolicy.staticSupersedence(for: Set(dueAgents.map(\.descriptor.kind)))
+            var blockedKinds = Self.flattenBlocks(persistentBlocksBySource, staticBlocks: staticBlocks)
 
             for agent in dueAgents {
                 let startedAt = Date()
+                if let reason = blockedKinds[agent.descriptor.kind] {
+                    let outcome = AgentOutcomeFactory(kind: agent.descriptor.kind, startedAt: startedAt)
+                        .skipped("Agent superseded by higher-priority safety rule", details: reason)
+                    await recordAndLog(outcome)
+                    scheduler.markDeferred(
+                        agent.descriptor.kind,
+                        at: Date(),
+                        retryAfterSeconds: config.app.supervisor.cycleSeconds
+                    )
+                    continue
+                }
                 if agent.descriptor.requiresMT5Bridge && bridge == nil {
                     if let bridgeUnavailableDetails {
                         let outcome = AgentOutcomeFactory(kind: agent.descriptor.kind, startedAt: startedAt)
                             .failed("MT5 bridge unavailable", details: bridgeUnavailableDetails)
                         await recordAndLog(outcome)
+                        Self.updatePersistentBlocks(
+                            &persistentBlocksBySource,
+                            after: outcome,
+                            policy: executionPolicy
+                        )
+                        blockedKinds = Self.flattenBlocks(persistentBlocksBySource, staticBlocks: staticBlocks)
                         scheduler.markFinished(
                             agent.descriptor.kind,
                             at: Date(),
-                            runOnlyOnce: agent.descriptor.runOnlyOnce
+                            runOnlyOnce: false
                         )
                         continue
                     }
@@ -73,10 +94,16 @@ public struct ProductionSupervisor: Sendable {
                         let outcome = AgentOutcomeFactory(kind: agent.descriptor.kind, startedAt: startedAt)
                             .failed("MT5 bridge unavailable", details: bridgeUnavailableDetails ?? "")
                         await recordAndLog(outcome)
+                        Self.updatePersistentBlocks(
+                            &persistentBlocksBySource,
+                            after: outcome,
+                            policy: executionPolicy
+                        )
+                        blockedKinds = Self.flattenBlocks(persistentBlocksBySource, staticBlocks: staticBlocks)
                         scheduler.markFinished(
                             agent.descriptor.kind,
                             at: Date(),
-                            runOnlyOnce: agent.descriptor.runOnlyOnce
+                            runOnlyOnce: false
                         )
                         continue
                     }
@@ -95,6 +122,17 @@ public struct ProductionSupervisor: Sendable {
                 do {
                     let outcome = try await agent.run(context: context, startedAt: startedAt)
                     await recordAndLog(outcome)
+                    Self.updatePersistentBlocks(
+                        &persistentBlocksBySource,
+                        after: outcome,
+                        policy: executionPolicy
+                    )
+                    blockedKinds = Self.flattenBlocks(persistentBlocksBySource, staticBlocks: staticBlocks)
+                    scheduler.markFinished(
+                        agent.descriptor.kind,
+                        at: Date(),
+                        runOnlyOnce: agent.descriptor.runOnlyOnce && (outcome.status == .ok || outcome.status == .skipped)
+                    )
                 } catch {
                     if agent.descriptor.requiresMT5Bridge || Self.isBridgeRelated(error) {
                         bridge = nil
@@ -103,12 +141,18 @@ public struct ProductionSupervisor: Sendable {
                     let outcome = AgentOutcomeFactory(kind: agent.descriptor.kind, startedAt: startedAt)
                         .failed("Agent failed", details: String(describing: error))
                     await recordAndLog(outcome)
+                    Self.updatePersistentBlocks(
+                        &persistentBlocksBySource,
+                        after: outcome,
+                        policy: executionPolicy
+                    )
+                    blockedKinds = Self.flattenBlocks(persistentBlocksBySource, staticBlocks: staticBlocks)
+                    scheduler.markFinished(
+                        agent.descriptor.kind,
+                        at: Date(),
+                        runOnlyOnce: false
+                    )
                 }
-                scheduler.markFinished(
-                    agent.descriptor.kind,
-                    at: Date(),
-                    runOnlyOnce: agent.descriptor.runOnlyOnce
-                )
             }
 
             if let maxCycles, cycle >= maxCycles {
@@ -147,5 +191,35 @@ public struct ProductionSupervisor: Sendable {
 
     private static func isBridgeRelated(_ error: Error) -> Bool {
         error is MT5BridgeError || error is ProtocolError || error is ProductionAgentError
+    }
+
+    private static func updatePersistentBlocks(
+        _ persistentBlocksBySource: inout [ProductionAgentKind: [ProductionAgentKind: String]],
+        after outcome: AgentOutcome,
+        policy: AgentExecutionPolicy
+    ) {
+        if outcome.status == .ok {
+            persistentBlocksBySource[outcome.agent] = nil
+            return
+        }
+        let blocks = policy.dynamicSupersedence(after: outcome)
+        if blocks.isEmpty {
+            persistentBlocksBySource[outcome.agent] = nil
+            return
+        }
+        persistentBlocksBySource[outcome.agent] = blocks
+    }
+
+    private static func flattenBlocks(
+        _ persistentBlocksBySource: [ProductionAgentKind: [ProductionAgentKind: String]],
+        staticBlocks: [ProductionAgentKind: String]
+    ) -> [ProductionAgentKind: String] {
+        var merged: [ProductionAgentKind: String] = [:]
+        for source in persistentBlocksBySource.keys.sorted(by: { $0.priorityRank < $1.priorityRank }) {
+            guard let blocks = persistentBlocksBySource[source] else { continue }
+            merged.merge(blocks) { current, _ in current }
+        }
+        merged.merge(staticBlocks) { current, _ in current }
+        return merged
     }
 }

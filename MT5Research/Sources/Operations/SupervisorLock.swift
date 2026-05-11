@@ -16,17 +16,21 @@ public final class SupervisorLock: @unchecked Sendable {
     }
 
     public static func acquireDefault(brokerSourceId: String) throws -> SupervisorLock {
+        try acquireRuntime(brokerSourceId: brokerSourceId, owner: "supervisor")
+    }
+
+    public static func acquireRuntime(brokerSourceId: String, owner: String) throws -> SupervisorLock {
         let safeId = brokerSourceId.map { character -> Character in
             character.isLetter || character.isNumber || character == "_" || character == "-" ? character : "_"
         }
-        let path = "/tmp/mt5research-\(String(safeId))-supervisor.lock"
+        let path = "/tmp/mt5research-\(String(safeId))-runtime.lock"
         let fd = open(path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
         guard fd >= 0 else {
-            throw SupervisorError.lockUnavailable("Cannot open supervisor lock at \(path): errno=\(errno)")
+            throw SupervisorError.lockUnavailable("Cannot open MT5Research runtime lock at \(path): errno=\(errno)")
         }
         guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
             _ = close(fd)
-            throw SupervisorError.lockUnavailable("Another MT5Research supervisor is already running for broker source \(brokerSourceId)")
+            throw SupervisorError.lockUnavailable("Another MT5Research writer/supervisor is already running for broker source \(brokerSourceId); \(owner) must wait")
         }
         return SupervisorLock(fileDescriptor: fd, path: path)
     }

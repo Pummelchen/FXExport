@@ -8,7 +8,7 @@ public struct ProductionAgentFactory: Sendable {
         let supervisor = config.app.supervisor
         return [
             HistoryImportProductionAgent(
-                intervalSeconds: 24 * 60 * 60,
+                intervalSeconds: max(60, supervisor.checkpointAuditIntervalSeconds),
                 enabled: runBackfillOnStart
             ),
             LiveM1UpdateProductionAgent(intervalSeconds: config.app.liveScanIntervalSeconds),

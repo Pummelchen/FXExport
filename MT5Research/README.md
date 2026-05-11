@@ -241,6 +241,8 @@ Safe recovery sequence:
 
 Backfill is designed to be rerun. A checkpoint is advanced only after raw insert, canonical range replacement, canonical insert, and canonical readback verification all succeed. If the process crashes before that point, rerunning backfill starts again from the last verified checkpoint. Canonical rows for the retried range are deleted and reinserted by both MT5 server-time range and UTC identity range, so duplicate canonical bars should not accumulate.
 
+Do not run `backfill`, `live`, `repair`, or `supervise` in parallel for the same `broker_source_id`. The CLI enforces this with a broker-level runtime lock under `/tmp`; if another writer or supervisor is active, the second command exits before touching MT5, canonical data, or checkpoints.
+
 Before oldest/latest discovery for each symbol, backfill asks the EA for MT5 M1 history status and waits up to 60 seconds for synchronization. If MT5 has not synchronized local history, backfill stops for that symbol instead of snapshotting a partial oldest/latest range.
 
 If MT5 exposes older historical bars after the first partial run, backfill now detects that the newly discovered oldest MT5 bar is earlier than the stored checkpoint oldest and reprocesses from the new oldest bar. This is conservative but prevents silent holes at the beginning of history.
@@ -313,22 +315,49 @@ Use `--skip-bridge` only for the early preflight before the EA is attached. A pr
 
 `repair --from` and `--to` are UTC dates in `YYYY-MM-DD` format. Repair first verifies the requested range against MT5, repairs canonical rows only when the mismatch is unambiguous and UTC mapping is verified, writes `repair_log`, and then verifies the range again. Raw audit rows are never deleted.
 
+## Backtest Readiness Gate
+
+`backtest` and `optimize` now run a database safety gate before any strategy scaffold is allowed to execute. The gate blocks when:
+
+- Any configured symbol has no checkpoint, a non-`live` ingest status, or a checkpoint mapped to a different configured MT5 symbol.
+- The requested backtest end is beyond the target symbol's latest verified checkpoint.
+- Canonical rows contain duplicate UTC identities, OHLC invariant failures, or non-verified offset confidence.
+- Any latest verification range result is not `clean`, or any latest repair range outcome is `failed`.
+- A required safety agent has a current `warning`/`failed` state.
+- Required safety agents have never reported OK, or their last OK is stale.
+
+Required fresh OK agent state for backtesting:
+
+| Agent | Default max OK age | Purpose |
+| --- | ---: | --- |
+| `utc_time_authority` | max(180s, 3x configured UTC interval) | Confirms broker server time is still covered by verified offset authority. |
+| `symbol_metadata_drift` | max(900s, 3x configured symbol interval) | Confirms MT5 symbols/digits still match config. |
+| `live_m1_updater` | max(120s, 6x live scan interval) | Confirms closed-M1 ingestion is currently healthy. |
+| `database_verifier_repairer` | max(7200s, 2x verifier interval) | Confirms DB integrity and MT5 random checks are clean according to config. |
+| `checkpoint_gap_auditor` | max(900s, 3x checkpoint audit interval) | Confirms checkpoint/canonical consistency and live lag checks. |
+
+This means a freshly loaded database is not considered backtest-ready until the supervisor has run the safety agents successfully. If a first import was interrupted, `ingest_state.status` remains `backfilling`, so backtests stay blocked until backfill is rerun and all configured symbols reach `live`.
+
 ## Production Supervisor Agents
 
-`supervise` runs ten operational agents through one sequential supervisor. The supervisor owns the single MT5 bridge connection, uses a per-broker lock so two supervisors cannot run against the same broker source, records agent events in ClickHouse, and keeps retryable failures from advancing ingestion checkpoints.
+`supervise` runs ten operational agents through one sequential supervisor. The supervisor owns the single MT5 bridge connection, uses the same broker runtime lock as standalone writer commands, records agent events in ClickHouse, and keeps retryable failures from advancing ingestion checkpoints.
 
-The agents are:
+The supervisor sorts due agents by explicit priority before every cycle:
 
-1. `history_importer` - optional first-run/resume backfill, enabled with `--with-backfill` or `supervisor.run_backfill_on_start`.
-2. `live_m1_updater` - 10 second closed-M1 ingestion loop.
-3. `database_verifier_repairer` - DB checks plus MT5 random range cross-checks and canonical-only repair when unambiguous.
-4. `utc_time_authority` - verifies live broker server offset against DB-backed verified offset segments for the exact terminal identity.
-5. `health_monitor` - checks ClickHouse and MT5 bridge reachability.
-6. `supervisor_coordinator` - confirms single bridge ownership and sequential MT5 access are active.
-7. `symbol_metadata_drift` - checks configured MT5 symbols and digit metadata for drift.
-8. `checkpoint_gap_auditor` - checks checkpoint/canonical consistency and warns when live ingestion falls behind MT5.
-9. `backup_readiness` - verifies canonical data exists for backup/export workflows.
-10. `alerting` - summarizes recent supervisor warnings/errors from `runtime_agent_events`.
+| Priority | Agent | Default Timing | Responsibility |
+| ---: | --- | --- | --- |
+| 10 | `supervisor_coordinator` | 30s | Confirms single bridge ownership and sequential MT5 access. |
+| 20 | `health_monitor` | 30s | Checks ClickHouse and current MT5 bridge reachability. |
+| 30 | `utc_time_authority` | 60s | Verifies live broker server offset against DB-backed verified offset segments. |
+| 40 | `symbol_metadata_drift` | 300s | Checks configured MT5 symbols and digit metadata. |
+| 50 | `history_importer` | run once only when enabled | Owns first-run/resume backfill. |
+| 60 | `live_m1_updater` | 10s | Ingests newly closed M1 bars. |
+| 70 | `database_verifier_repairer` | 3600s | Runs DB checks, MT5 random cross-checks, and safe canonical repair. |
+| 80 | `checkpoint_gap_auditor` | 300s | Checks checkpoint/canonical consistency and live lag. |
+| 90 | `backup_readiness` | 3600s | Verifies canonical data exists for backup/export workflows. |
+| 100 | `alerting` | 30s | Summarizes recent supervisor warnings/errors. |
+
+Supersedence rules are conservative. `history_importer` blocks live updates, verifier/repair, checkpoint audit, and backup readiness for that cycle because it owns canonical writes and checkpoints during first-run/resume. A failed or warning UTC authority blocks ingestion and verification because canonical UTC cannot be trusted. Symbol metadata failures block ingestion and verification. Verifier or checkpoint warnings block backup readiness. Health failures block all MT5-dependent and data-quality agents. Dynamic supersedence persists across cycles until the source agent reports OK, so a failed UTC or symbol check cannot be bypassed merely because its next scheduled check is not due yet. A failed first-run importer is retried on the checkpoint-audit interval instead of being marked completed.
 
 Supervisor intervals are configured under `supervisor` in `Config/app.json`. The default production stance is to leave backfill disabled in the supervisor and run it deliberately, then use `supervise` for ongoing operation.
 
@@ -346,7 +375,8 @@ Implemented:
 - TCP socket transport in Swift with separate connect/accept timeout and request read/write timeout.
 - ClickHouse HTTP client and migrations.
 - Backfill/live update agents with MT5 history synchronization checks, conflict recording, checkpoint-after-canonical-readback flow, and canonical range replacement.
-- Production supervisor with ten operational agents and runtime event/state tables.
+- Production supervisor with ten operational agents, priority/supersedence rules, broker runtime lock, and runtime event/state tables.
+- Backtest/optimize readiness gate that blocks on incomplete first-run ingest, damaged canonical data, unresolved verification/repair state, or stale safety-agent OK state.
 - `startcheck` go-live gate with ClickHouse checks, MetaEditor EA compile, MT5 terminal identity validation, verified broker UTC offset coverage, and `GET_RATES_FROM_POSITION` smoke testing.
 - Startup verifier checks plus random historical MT5-vs-ClickHouse range comparison.
 - Canonical-only repair command with verify -> repair -> reverify flow.
