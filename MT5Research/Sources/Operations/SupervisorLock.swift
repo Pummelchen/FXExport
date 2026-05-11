@@ -23,14 +23,14 @@ public final class SupervisorLock: @unchecked Sendable {
         let safeId = brokerSourceId.map { character -> Character in
             character.isLetter || character.isNumber || character == "_" || character == "-" ? character : "_"
         }
-        let path = "/tmp/mt5research-\(String(safeId))-runtime.lock"
+        let path = "/tmp/fxexport-\(String(safeId))-runtime.lock"
         let fd = open(path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
         guard fd >= 0 else {
-            throw SupervisorError.lockUnavailable("Cannot open MT5Research runtime lock at \(path): errno=\(errno)")
+            throw SupervisorError.lockUnavailable("Cannot open FXExport runtime lock at \(path): errno=\(errno)")
         }
         guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
             _ = close(fd)
-            throw SupervisorError.lockUnavailable("Another MT5Research writer/supervisor is already running for broker source \(brokerSourceId); \(owner) must wait")
+            throw SupervisorError.lockUnavailable("Another FXExport writer/supervisor is already running for broker source \(brokerSourceId); \(owner) must wait")
         }
         return SupervisorLock(fileDescriptor: fd, path: path)
     }

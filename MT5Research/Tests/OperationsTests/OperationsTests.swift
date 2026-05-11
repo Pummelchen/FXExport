@@ -48,7 +48,7 @@ final class OperationsTests: XCTestCase {
 
     func testConfigLoaderAllowsEmptyLogPathsWhenFileLoggingIsDisabled() throws {
         let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("mt5research-config-test-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("FXExport-config-test-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
 
@@ -108,8 +108,8 @@ final class OperationsTests: XCTestCase {
 
     func testPersistentLogSinkWritesJSONAndRotates() throws {
         let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("mt5research-log-test-\(UUID().uuidString)", isDirectory: true)
-        let url = directory.appendingPathComponent("mt5research.log")
+            .appendingPathComponent("FXExport-log-test-\(UUID().uuidString)", isDirectory: true)
+        let url = directory.appendingPathComponent("FXExport.log")
         let sink = try PersistentLogSink(fileURL: url, maxFileBytes: 120, maxRotatedFiles: 1)
         let logger = Logger(level: .normal, persistentLogSink: sink)
 

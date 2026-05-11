@@ -1,6 +1,6 @@
 {
   "url": "http://localhost:8123",
-  "database": "mt5research",
+  "database": "fxexport",
   "username": null,
   "password": null,
   "requestTimeoutSeconds": 60,

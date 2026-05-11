@@ -76,7 +76,7 @@ public struct OperationalLoggingConfig: Codable, Sendable, Equatable {
 
     public static let `default` = OperationalLoggingConfig(
         fileLoggingEnabled: true,
-        logFilePath: "Logs/mt5research.log",
+        logFilePath: "Logs/FXExport.log",
         alertFilePath: "Logs/alerts.jsonl",
         maxFileBytes: 10 * 1024 * 1024,
         maxRotatedFiles: 5

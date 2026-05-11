@@ -1,6 +1,6 @@
-# MT5Research
+# FXExport
 
-MT5Research is a macOS terminal Swift project for exporting MetaTrader 5 historical M1 OHLC data into ClickHouse, verifying it against MT5, repairing canonical ranges only when safe, and preparing the data path for deterministic CPU backtesting and optional Metal acceleration on Apple Silicon.
+FXExport is a macOS terminal Swift project for exporting MetaTrader 5 historical M1 OHLC data into ClickHouse, verifying it against MT5, repairing canonical ranges only when safe, and preparing the data path for deterministic CPU backtesting and optional Metal acceleration on Apple Silicon.
 
 The implementation is intentionally defensive:
 
@@ -24,7 +24,7 @@ The system has two parts:
    - Sends M1 OHLC only.
    - Does not make database, checkpoint, UTC, verification, or repair decisions.
 
-2. `mt5research`
+2. `FXExport`
    - Swift terminal executable.
    - Listens for or connects to the MT5 bridge.
    - Validates and converts MT5 data.
@@ -53,7 +53,7 @@ swift build -c release
 The executable is:
 
 ```bash
-.build/release/mt5research
+.build/release/FXExport
 ```
 
 ## First Run Quickstart
@@ -77,14 +77,14 @@ swift build -c release
 4. Run the database and EA preflight. This applies idempotent migrations, verifies required tables, runs DB-only integrity checks, and compiles `HistoryBridgeEA.mq5` through MetaEditor from the terminal:
 
 ```bash
-.build/release/mt5research startcheck --config-dir Config --migrations-dir Migrations --skip-bridge
+.build/release/FXExport startcheck --config-dir Config --migrations-dir Migrations --skip-bridge
 ```
 
 5. Attach the compiled `HistoryBridgeEA` in MT5. Set `SwiftHost = 127.0.0.1` and `SwiftPort = 5055`, then allow localhost sockets in MT5/Wine if prompted.
 6. Run the full go-live gate. This repeats the DB and EA compile checks, waits for the EA socket, verifies the connected MT5 terminal identity, checks the live server offset through the EA, proves verified offset coverage for the configured MT5 history, and tests `GET_RATES_FROM_POSITION` with `start_pos=1` so the open M1 bar is excluded:
 
 ```bash
-.build/release/mt5research startcheck --config-dir Config --migrations-dir Migrations
+.build/release/FXExport startcheck --config-dir Config --migrations-dir Migrations
 ```
 
 If `startcheck` stops at the bridge step, follow the terminal message: start MT5, attach the compiled EA, verify the host/port, then rerun the same command. If it reports missing `broker_time_offsets`, insert active, verified historical offset authority for the exact MT5 company/server/account shown by the EA. Do not calculate the current live offset by hand; `startcheck`, `bridge-check`, `backfill`, `live`, and MT5-backed `verify` check the live offset automatically through the EA.
@@ -92,38 +92,38 @@ If `startcheck` stops at the bridge step, follow the terminal message: start MT5
 7. Confirm symbol mappings and broker digits:
 
 ```bash
-.build/release/mt5research symbol-check --config-dir Config
+.build/release/FXExport symbol-check --config-dir Config
 ```
 
 8. Run the initial historical backfill:
 
 ```bash
-.build/release/mt5research backfill --config-dir Config --symbols all
+.build/release/FXExport backfill --config-dir Config --symbols all
 ```
 
 9. Run verification without random MT5 ranges first, then with MT5 random ranges when the bridge is connected:
 
 ```bash
-.build/release/mt5research verify --config-dir Config --random-ranges 0
-.build/release/mt5research verify --config-dir Config --random-ranges 20
+.build/release/FXExport verify --config-dir Config --random-ranges 0
+.build/release/FXExport verify --config-dir Config --random-ranges 20
 ```
 
 10. Start live updates only after backfill is complete or intentionally resumed:
 
 ```bash
-.build/release/mt5research live --config-dir Config
+.build/release/FXExport live --config-dir Config
 ```
 
 For production operation, prefer the supervised runtime instead of running `live` alone:
 
 ```bash
-.build/release/mt5research supervise --config-dir Config
+.build/release/FXExport supervise --config-dir Config
 ```
 
 If the first historical import should be owned by the supervisor, start it explicitly:
 
 ```bash
-.build/release/mt5research supervise --config-dir Config --with-backfill
+.build/release/FXExport supervise --config-dir Config --with-backfill
 ```
 
 ## Configuration
@@ -150,7 +150,7 @@ ClickHouse credentials belong only in local ignored files under `Config/`. The S
 ```json
 "logging": {
   "file_logging_enabled": true,
-  "log_file_path": "Logs/mt5research.log",
+  "log_file_path": "Logs/FXExport.log",
   "alert_file_path": "Logs/alerts.jsonl",
   "max_file_bytes": 10485760,
   "max_rotated_files": 5
@@ -195,7 +195,7 @@ Do not mark offset data as verified unless you have actually verified the broker
 Example verified offset row:
 
 ```sql
-INSERT INTO mt5research.broker_time_offsets
+INSERT INTO fxexport.broker_time_offsets
 (
   broker_source_id, mt5_company, mt5_server, mt5_account_login,
   valid_from_mt5_server_ts, valid_to_mt5_server_ts, offset_seconds,
@@ -230,7 +230,7 @@ If `expected_terminal_identity` values are provided, `bridge-check`, `backfill`,
 Run:
 
 ```bash
-swift run mt5research migrate
+swift run FXExport migrate
 ```
 
 This creates:
@@ -256,11 +256,11 @@ If the first backfill is interrupted by a crash, reboot, terminal close, MT5 dis
 Safe recovery sequence:
 
 ```bash
-.build/release/mt5research migrate --config-dir Config --migrations-dir Migrations
-.build/release/mt5research verify --config-dir Config --random-ranges 0
-.build/release/mt5research backfill --config-dir Config --symbols all
-.build/release/mt5research verify --config-dir Config --random-ranges 20
-.build/release/mt5research supervise --config-dir Config
+.build/release/FXExport migrate --config-dir Config --migrations-dir Migrations
+.build/release/FXExport verify --config-dir Config --random-ranges 0
+.build/release/FXExport backfill --config-dir Config --symbols all
+.build/release/FXExport verify --config-dir Config --random-ranges 20
+.build/release/FXExport supervise --config-dir Config
 ```
 
 Backfill is designed to be rerun. A checkpoint is advanced only after raw insert, canonical range replacement, canonical insert, and canonical readback verification all succeed. If the process crashes before that point, rerunning backfill starts again from the last verified checkpoint. Canonical rows for the retried range are deleted and reinserted by both MT5 server-time range and UTC identity range, so duplicate canonical bars should not accumulate.
@@ -280,7 +280,7 @@ Raw audit rows are append-only. A crash/retry may leave repeated raw audit attem
 Keep `EA/HistoryBridgeEA.mq5` under the MT5 `MQL5/Experts` tree and let `startcheck` compile it through MetaEditor:
 
 ```bash
-.build/release/mt5research startcheck --config-dir Config --migrations-dir Migrations --skip-bridge
+.build/release/FXExport startcheck --config-dir Config --migrations-dir Migrations --skip-bridge
 ```
 
 If your package is outside the MT5 Experts tree, copy `EA/HistoryBridgeEA.mq5` into `MQL5/Experts` first or set `MT5RESEARCH_METAEDITOR`, `MT5RESEARCH_WINE`, and `MT5RESEARCH_WINEPREFIX` so the terminal compile check can find the MT5 toolchain.
@@ -297,24 +297,24 @@ Then start a Swift command that listens for the EA.
 At startup, commands that require ClickHouse first run a local readiness check. If local ClickHouse is stopped, the program tries to start it and waits for the HTTP endpoint before continuing. Commands that require MT5 print action-oriented bridge setup guidance when the EA/socket is not ready instead of leaving the user with only a low-level socket error.
 
 ```bash
-swift run mt5research migrate
-swift run mt5research bridge-check
-swift run mt5research symbol-check
-swift run mt5research backfill --symbols all
-swift run mt5research backfill --symbols EURUSD,USDJPY
-swift run mt5research live
-swift run mt5research supervise
-swift run mt5research supervise --with-backfill
-swift run mt5research supervise --supervisor-cycles 1
-swift run mt5research startcheck
-swift run mt5research -startcheck
-swift run mt5research failure-guide
-swift run mt5research verify
-swift run mt5research verify --random-ranges 20
-swift run mt5research repair --symbol EURUSD --from 2020-01-01 --to 2020-02-01
-swift run mt5research export-cache --symbol EURUSD --from 2020-01-01 --to 2025-01-01
-swift run mt5research backtest --config Config/backtest.json
-swift run mt5research optimize --config Config/optimize.json
+swift run FXExport migrate
+swift run FXExport bridge-check
+swift run FXExport symbol-check
+swift run FXExport backfill --symbols all
+swift run FXExport backfill --symbols EURUSD,USDJPY
+swift run FXExport live
+swift run FXExport supervise
+swift run FXExport supervise --with-backfill
+swift run FXExport supervise --supervisor-cycles 1
+swift run FXExport startcheck
+swift run FXExport -startcheck
+swift run FXExport failure-guide
+swift run FXExport verify
+swift run FXExport verify --random-ranges 20
+swift run FXExport repair --symbol EURUSD --from 2020-01-01 --to 2020-02-01
+swift run FXExport export-cache --symbol EURUSD --from 2020-01-01 --to 2025-01-01
+swift run FXExport backtest --config Config/backtest.json
+swift run FXExport optimize --config Config/optimize.json
 ```
 
 Global options:

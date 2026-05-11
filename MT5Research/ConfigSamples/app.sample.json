@@ -6,7 +6,7 @@
   "verifier_random_ranges": 1,
   "logging": {
     "file_logging_enabled": true,
-    "log_file_path": "Logs/mt5research.log",
+    "log_file_path": "Logs/FXExport.log",
     "alert_file_path": "Logs/alerts.jsonl",
     "max_file_bytes": 10485760,
     "max_rotated_files": 5

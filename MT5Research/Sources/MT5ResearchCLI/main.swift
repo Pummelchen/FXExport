@@ -609,7 +609,7 @@ struct MT5ResearchCLI {
 
     private static func printUsage() {
         print("""
-        mt5research <command> [options]
+        FXExport <command> [options]
 
         Commands:
           migrate
@@ -678,9 +678,9 @@ private struct MT5BridgeStartupError: Error, CustomStringConvertible {
             Reason: \(error.description)
             Next steps:
               1. Check what owns the port: lsof -nP -iTCP:\(config.port) -sTCP:LISTEN
-              2. Stop the other mt5research process, or change Config/mt5_bridge.json to another free port.
+              2. Stop the other FXExport process, or change Config/mt5_bridge.json to another free port.
               3. Reattach HistoryBridgeEA with the same SwiftHost/SwiftPort values.
-              4. Rerun: mt5research startcheck --config-dir Config --migrations-dir Migrations
+              4. Rerun: FXExport startcheck --config-dir Config --migrations-dir Migrations
             """
         case .acceptTimedOut:
             return listenModeGuidance(reason: error.description)
@@ -693,7 +693,7 @@ private struct MT5BridgeStartupError: Error, CustomStringConvertible {
             Next steps:
               1. For local MT5/Wine, set host to 127.0.0.1.
               2. Keep the EA input SwiftHost exactly the same.
-              3. Rerun: mt5research startcheck --config-dir Config --migrations-dir Migrations
+              3. Rerun: FXExport startcheck --config-dir Config --migrations-dir Migrations
             """
         default:
             switch config.mode {
@@ -714,7 +714,7 @@ private struct MT5BridgeStartupError: Error, CustomStringConvertible {
           2. Attach the compiled HistoryBridgeEA to any chart.
           3. In the EA inputs set SwiftHost=\(config.host) and SwiftPort=\(config.port).
           4. Enable Algo Trading and allow localhost/socket access in MT5/Wine when prompted.
-          5. Leave this Swift command running while the EA connects, or rerun: mt5research startcheck --config-dir Config --migrations-dir Migrations
+          5. Leave this Swift command running while the EA connects, or rerun: FXExport startcheck --config-dir Config --migrations-dir Migrations
         """
     }
 
@@ -726,7 +726,7 @@ private struct MT5BridgeStartupError: Error, CustomStringConvertible {
           1. Confirm the MT5 EA bridge is already listening on \(config.host):\(config.port), or switch Config/mt5_bridge.json mode to "listen".
           2. Check the port: lsof -nP -iTCP:\(config.port)
           3. Confirm macOS/Wine firewall prompts are allowed.
-          4. Rerun: mt5research startcheck --config-dir Config --migrations-dir Migrations
+          4. Rerun: FXExport startcheck --config-dir Config --migrations-dir Migrations
         """
     }
 }

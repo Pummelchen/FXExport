@@ -7,7 +7,7 @@ let package = Package(
         .macOS(.v13)
     ],
     products: [
-        .executable(name: "mt5research", targets: ["MT5ResearchCLI"])
+        .executable(name: "FXExport", targets: ["MT5ResearchCLI"])
     ],
     targets: [
         .target(name: "Domain"),

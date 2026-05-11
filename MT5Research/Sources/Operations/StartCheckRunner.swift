@@ -320,7 +320,7 @@ public enum StartCheckError: Error, CustomStringConvertible, Sendable {
 private enum StartCheckGuidance {
     static func guidance(for error: Error) -> String {
         if case StartCheckError.missingTables = error {
-            return "Next action: rerun `mt5research migrate --config-dir Config --migrations-dir Migrations`, then rerun `mt5research startcheck --config-dir Config`."
+            return "Next action: rerun `FXExport migrate --config-dir Config --migrations-dir Migrations`, then rerun `FXExport startcheck --config-dir Config`."
         }
         if case StartCheckError.metaEditorNotFound = error {
             return "Next action: confirm `/Applications/MetaTrader 5.app` exists, or set MT5RESEARCH_WINE and MT5RESEARCH_METAEDITOR before running startcheck."
@@ -363,7 +363,7 @@ public struct MetaEditorCompiler: Sendable {
         let liveOutput = source.deletingPathExtension().appendingPathExtension("ex5")
         let stageOutput = stage.source.deletingPathExtension().appendingPathExtension("ex5")
         let stdoutPath = FileManager.default.temporaryDirectory
-            .appendingPathComponent("mt5research-HistoryBridgeEA-stdout-\(UUID().uuidString).log")
+            .appendingPathComponent("FXExport-HistoryBridgeEA-stdout-\(UUID().uuidString).log")
         guard FileManager.default.createFile(atPath: stdoutPath.path, contents: nil) else {
             throw StartCheckError.eaCompileFailed("Could not create MetaEditor output log at \(stdoutPath.path)")
         }
@@ -442,7 +442,7 @@ public struct MetaEditorCompiler: Sendable {
 
     private static func createCompileStage(for source: URL) throws -> (directory: URL, source: URL) {
         let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("mt5research-HistoryBridgeEA-stage-\(UUID().uuidString)")
+            .appendingPathComponent("FXExport-HistoryBridgeEA-stage-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let stagedSource = directory.appendingPathComponent(source.lastPathComponent)
         try FileManager.default.copyItem(at: source, to: stagedSource)
