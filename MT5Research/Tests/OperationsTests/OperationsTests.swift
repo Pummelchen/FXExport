@@ -46,6 +46,66 @@ final class OperationsTests: XCTestCase {
         XCTAssertEqual(config.supervisor.clickHouseDiskFreeAlertBytes, SupervisorConfig.default.clickHouseDiskFreeAlertBytes)
     }
 
+    func testConfigLoaderAllowsEmptyLogPathsWhenFileLoggingIsDisabled() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mt5research-config-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try writeConfig("""
+        {
+          "chunk_size": 50000,
+          "live_scan_interval_seconds": 10,
+          "log_level": "normal",
+          "strict_symbol_failures": false,
+          "verifier_random_ranges": 0,
+          "logging": {
+            "file_logging_enabled": false,
+            "log_file_path": "",
+            "alert_file_path": "",
+            "max_file_bytes": 0,
+            "max_rotated_files": 0
+          }
+        }
+        """, name: "app.json", directory: directory)
+        try writeConfig("""
+        {
+          "url": "http://localhost:8123",
+          "database": "db",
+          "username": null,
+          "password": null,
+          "requestTimeoutSeconds": 10,
+          "retryCount": 0
+        }
+        """, name: "clickhouse.json", directory: directory)
+        try writeConfig("""
+        {
+          "mode": "listen",
+          "host": "127.0.0.1",
+          "port": 5055,
+          "connectTimeoutSeconds": 10,
+          "requestTimeoutSeconds": 10
+        }
+        """, name: "mt5_bridge.json", directory: directory)
+        try writeConfig("""
+        {
+          "broker_source_id": "demo",
+          "accepted_live_offset_seconds": [7200, 10800]
+        }
+        """, name: "broker_time.json", directory: directory)
+        try writeConfig("""
+        {
+          "symbols": [
+            { "logical_symbol": "EURUSD", "mt5_symbol": "EURUSD", "digits": 5 }
+          ]
+        }
+        """, name: "symbols.json", directory: directory)
+
+        let bundle = try ConfigLoader().loadBundle(configDirectory: directory)
+
+        XCTAssertFalse(bundle.app.logging.fileLoggingEnabled)
+    }
+
     func testPersistentLogSinkWritesJSONAndRotates() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("mt5research-log-test-\(UUID().uuidString)", isDirectory: true)
@@ -443,6 +503,69 @@ final class OperationsTests: XCTestCase {
             }
         }
     }
+
+    func testCheckpointGapAuditWarnsOnMissingConfiguredCheckpoints() async throws {
+        let config = try makeConfig()
+        let clickHouse = CheckpointAuditClickHouse(mode: .missingUSDJPYCheckpoint)
+        let agent = CheckpointGapAuditAgent(intervalSeconds: 300)
+        let context = AgentRuntimeContext(
+            config: config,
+            clickHouse: clickHouse,
+            bridge: nil,
+            eventStore: InMemoryAgentEventStore(),
+            logger: Logger(level: .quiet),
+            supervisorStartedAtUtc: UtcSecond(rawValue: 1),
+            repairOnVerifierMismatch: false
+        )
+
+        let outcome = try await agent.run(context: context, startedAt: Date(timeIntervalSince1970: 1))
+
+        XCTAssertEqual(outcome.status, .warning)
+        XCTAssertTrue(outcome.message.contains("missing ingest checkpoints"))
+        XCTAssertTrue(outcome.details.contains("missing_checkpoints=USDJPY"))
+    }
+
+    func testCheckpointGapAuditWarnsOnInterruptedBackfillState() async throws {
+        let config = try makeConfig()
+        let clickHouse = CheckpointAuditClickHouse(mode: .interruptedEURUSD)
+        let agent = CheckpointGapAuditAgent(intervalSeconds: 300)
+        let context = AgentRuntimeContext(
+            config: config,
+            clickHouse: clickHouse,
+            bridge: nil,
+            eventStore: InMemoryAgentEventStore(),
+            logger: Logger(level: .quiet),
+            supervisorStartedAtUtc: UtcSecond(rawValue: 1),
+            repairOnVerifierMismatch: false
+        )
+
+        let outcome = try await agent.run(context: context, startedAt: Date(timeIntervalSince1970: 1))
+
+        XCTAssertEqual(outcome.status, .warning)
+        XCTAssertTrue(outcome.message.contains("not live"))
+        XCTAssertTrue(outcome.details.contains("EURUSD:status=backfilling"))
+    }
+
+    func testBackupReadinessFiltersCanonicalRowsByConfiguredBroker() async throws {
+        let config = try makeConfig()
+        let clickHouse = BackupReadinessClickHouse()
+        let agent = BackupReadinessAgent(intervalSeconds: 3600)
+        let context = AgentRuntimeContext(
+            config: config,
+            clickHouse: clickHouse,
+            bridge: nil,
+            eventStore: InMemoryAgentEventStore(),
+            logger: Logger(level: .quiet),
+            supervisorStartedAtUtc: UtcSecond(rawValue: 1),
+            repairOnVerifierMismatch: false
+        )
+
+        _ = try await agent.run(context: context, startedAt: Date(timeIntervalSince1970: 1))
+
+        let queries = await clickHouse.queries
+        XCTAssertEqual(queries.count, 1)
+        XCTAssertTrue(queries[0].sql.contains("WHERE broker_source_id = 'demo'"))
+    }
 }
 
 private struct StubAgent: ProductionAgent {
@@ -475,6 +598,11 @@ private enum BacktestGateMode {
     case interruptedBackfill
     case failedAgentState
     case missingRequiredAgentState
+}
+
+private enum CheckpointAuditMode {
+    case missingUSDJPYCheckpoint
+    case interruptedEURUSD
 }
 
 private actor BacktestGateClickHouse: ClickHouseClientProtocol {
@@ -515,6 +643,42 @@ private actor BacktestGateClickHouse: ClickHouseClientProtocol {
             return "10\n"
         }
         return "0\n"
+    }
+}
+
+private actor CheckpointAuditClickHouse: ClickHouseClientProtocol {
+    private let mode: CheckpointAuditMode
+
+    init(mode: CheckpointAuditMode) {
+        self.mode = mode
+    }
+
+    func execute(_ query: ClickHouseQuery) async throws -> String {
+        let sql = query.sql
+        if sql.contains("FROM db.ingest_state") {
+            if sql.contains("logical_symbol = 'EURUSD'") {
+                let status = mode == .interruptedEURUSD ? "backfilling" : "live"
+                return "demo\tEURUSD\tEURUSD\t0\t180\t180\t\(status)\tbatch\t200\n"
+            }
+            if sql.contains("logical_symbol = 'USDJPY'") {
+                guard mode != .missingUSDJPYCheckpoint else { return "" }
+                return "demo\tUSDJPY\tUSDJPY\t0\t180\t180\tlive\tbatch\t200\n"
+            }
+            return ""
+        }
+        if sql.contains("ohlc_m1_canonical") {
+            return "1\n"
+        }
+        return "0\n"
+    }
+}
+
+private actor BackupReadinessClickHouse: ClickHouseClientProtocol {
+    private(set) var queries: [ClickHouseQuery] = []
+
+    func execute(_ query: ClickHouseQuery) async throws -> String {
+        queries.append(query)
+        return "1\t60\t120\n"
     }
 }
 
@@ -632,6 +796,11 @@ private func makeConfig(
             SymbolMapping(logicalSymbol: try LogicalSymbol("USDJPY"), mt5Symbol: try MT5Symbol("USDJPY"), digits: try Digits(3))
         ])
     )
+}
+
+private func writeConfig(_ text: String, name: String, directory: URL) throws {
+    let data = try XCTUnwrap(text.data(using: .utf8))
+    try data.write(to: directory.appendingPathComponent(name))
 }
 
 private func XCTAssertThrowsErrorAsync<T>(

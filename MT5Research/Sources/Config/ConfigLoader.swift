@@ -202,6 +202,7 @@ public struct ConfigLoader: Sendable {
     }
 
     private func validateLogging(_ logging: OperationalLoggingConfig) throws {
+        guard logging.fileLoggingEnabled else { return }
         guard logging.maxFileBytes >= 1024 else {
             throw ConfigError.invalidValue("logging.max_file_bytes must be at least 1024")
         }

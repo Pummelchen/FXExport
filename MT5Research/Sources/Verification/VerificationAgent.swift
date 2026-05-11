@@ -31,9 +31,11 @@ public struct VerificationAgent: Sendable {
         let duplicateRows = try await clickHouse.execute(.select("""
         SELECT broker_source_id, logical_symbol, ts_utc, count()
         FROM \(config.clickHouse.database).ohlc_m1_canonical
+        WHERE broker_source_id = '\(sqlLiteral(config.brokerTime.brokerSourceId.rawValue))'
         GROUP BY broker_source_id, logical_symbol, ts_utc
         HAVING count() > 1
         LIMIT 20
+        FORMAT TabSeparated
         """))
         if !duplicateRows.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             let issue = "Duplicate canonical keys found:\n\(duplicateRows)"
@@ -45,7 +47,9 @@ public struct VerificationAgent: Sendable {
         let invariantCount = try await clickHouse.execute(.select("""
         SELECT count()
         FROM \(config.clickHouse.database).ohlc_m1_canonical
-        WHERE open_scaled <= 0 OR high_scaled < open_scaled OR high_scaled < close_scaled OR high_scaled < low_scaled OR low_scaled > open_scaled OR low_scaled > close_scaled
+        WHERE broker_source_id = '\(sqlLiteral(config.brokerTime.brokerSourceId.rawValue))'
+          AND (open_scaled <= 0 OR high_scaled < open_scaled OR high_scaled < close_scaled OR high_scaled < low_scaled OR low_scaled > open_scaled OR low_scaled > close_scaled)
+        FORMAT TabSeparated
         """))
         if invariantCount.trimmingCharacters(in: .whitespacesAndNewlines) != "0" {
             let issue = "OHLC invariant violations found: \(invariantCount.trimmingCharacters(in: .whitespacesAndNewlines))"
@@ -57,7 +61,9 @@ public struct VerificationAgent: Sendable {
         let unverifiedCount = try await clickHouse.execute(.select("""
         SELECT count()
         FROM \(config.clickHouse.database).ohlc_m1_canonical
-        WHERE offset_confidence != 'verified'
+        WHERE broker_source_id = '\(sqlLiteral(config.brokerTime.brokerSourceId.rawValue))'
+          AND offset_confidence != 'verified'
+        FORMAT TabSeparated
         """))
         if unverifiedCount.trimmingCharacters(in: .whitespacesAndNewlines) != "0" {
             let issue = "Canonical rows with non-verified UTC offsets found: \(unverifiedCount.trimmingCharacters(in: .whitespacesAndNewlines))"
@@ -134,6 +140,10 @@ public struct VerificationAgent: Sendable {
                 )
             }
         }
+    }
+
+    private func sqlLiteral(_ value: String) -> String {
+        value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
     }
 }
 

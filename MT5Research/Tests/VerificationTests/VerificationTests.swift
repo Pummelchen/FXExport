@@ -1,3 +1,6 @@
+import AppCore
+import ClickHouse
+import Config
 import Domain
 import TimeMapping
 import Verification
@@ -197,4 +200,66 @@ final class VerificationTests: XCTestCase {
             }
         }
     }
+
+    func testStartupDatabaseChecksAreScopedToConfiguredBroker() async throws {
+        let config = try makeVerificationConfig()
+        let clickHouse = StartupVerificationClickHouse()
+        let agent = VerificationAgent(
+            config: config,
+            bridge: nil,
+            clickHouse: clickHouse,
+            logger: Logger(level: .quiet)
+        )
+
+        try await agent.startupChecks(randomRanges: 0)
+
+        let queries = await clickHouse.queries
+        XCTAssertEqual(queries.count, 3)
+        for query in queries {
+            XCTAssertTrue(query.sql.contains("broker_source_id = 'demo'"), query.sql)
+        }
+    }
+}
+
+private actor StartupVerificationClickHouse: ClickHouseClientProtocol {
+    private(set) var queries: [ClickHouseQuery] = []
+
+    func execute(_ query: ClickHouseQuery) async throws -> String {
+        queries.append(query)
+        return query.sql.contains("SELECT broker_source_id") ? "" : "0\n"
+    }
+}
+
+private func makeVerificationConfig() throws -> ConfigBundle {
+    ConfigBundle(
+        app: AppConfigFile(
+            chunkSize: 50_000,
+            liveScanIntervalSeconds: 10,
+            logLevel: .normal,
+            strictSymbolFailures: false,
+            verifierRandomRanges: 0
+        ),
+        clickHouse: ClickHouseConfig(
+            url: try XCTUnwrap(URL(string: "http://localhost:8123")),
+            database: "db",
+            username: nil,
+            password: nil,
+            requestTimeoutSeconds: 10,
+            retryCount: 0
+        ),
+        mt5Bridge: MT5BridgeConfig(
+            mode: .listen,
+            host: "127.0.0.1",
+            port: 5055,
+            connectTimeoutSeconds: 10,
+            requestTimeoutSeconds: 10
+        ),
+        brokerTime: BrokerTimeConfig(
+            brokerSourceId: try BrokerSourceId("demo"),
+            offsetSegments: []
+        ),
+        symbols: SymbolConfig(symbols: [
+            SymbolMapping(logicalSymbol: try LogicalSymbol("EURUSD"), mt5Symbol: try MT5Symbol("EURUSD"), digits: try Digits(5))
+        ])
+    )
 }

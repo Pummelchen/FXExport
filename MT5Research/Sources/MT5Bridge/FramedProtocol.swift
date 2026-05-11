@@ -293,6 +293,7 @@ public struct FrameParser: Sendable {
         while buffer.count >= 4 {
             let prefix = buffer.prefix(4)
             let length = try FramedProtocolCodec.bodyLength(from: Data(prefix))
+            guard length > 0 else { throw ProtocolError.malformedLengthPrefix }
             guard length <= maxFrameBytes else { throw ProtocolError.frameTooLarge(length) }
             guard buffer.count >= 4 + length else { break }
             let body = buffer.dropFirst(4).prefix(length)

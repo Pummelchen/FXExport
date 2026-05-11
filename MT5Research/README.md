@@ -363,7 +363,7 @@ Required fresh OK agent state for backtesting:
 | `symbol_metadata_drift` | max(900s, 3x configured symbol interval) | Confirms MT5 symbols/digits still match config. |
 | `live_m1_updater` | max(120s, 6x live scan interval) | Confirms closed-M1 ingestion is currently healthy. |
 | `database_verifier_repairer` | max(7200s, 2x verifier interval) | Confirms DB integrity and MT5 random checks are clean according to config. |
-| `checkpoint_gap_auditor` | max(900s, 3x checkpoint audit interval) | Confirms checkpoint/canonical consistency and live lag checks. |
+| `checkpoint_gap_auditor` | max(900s, 3x checkpoint audit interval) | Confirms every configured symbol has a live checkpoint, checkpoint MT5 symbols still match config, checkpoint/canonical rows are consistent, and live lag is acceptable. |
 
 This means a freshly loaded database is not considered backtest-ready until the supervisor has run the safety agents successfully. If a first import was interrupted, `ingest_state.status` remains `backfilling`, so backtests stay blocked until backfill is rerun and all configured symbols reach `live`.
 
@@ -382,11 +382,11 @@ The supervisor sorts due agents by explicit priority before every cycle:
 | 50 | `history_importer` | run once only when enabled | Owns first-run/resume backfill. |
 | 60 | `live_m1_updater` | 10s | Ingests newly closed M1 bars. |
 | 70 | `database_verifier_repairer` | 3600s | Runs DB checks, MT5 random cross-checks, and safe canonical repair. |
-| 80 | `checkpoint_gap_auditor` | 300s | Checks checkpoint/canonical consistency and live lag. |
-| 90 | `backup_readiness` | 3600s | Verifies canonical data exists for backup/export workflows. |
+| 80 | `checkpoint_gap_auditor` | 300s | Checks missing checkpoints, non-live ingest states, MT5 symbol mapping drift, checkpoint/canonical consistency, and live lag. |
+| 90 | `backup_readiness` | 3600s | Verifies canonical data exists for the configured broker before backup/export workflows. |
 | 100 | `alerting` | 30s | Raises persistent alerts for runtime failures, stale safety agents, verifier/repair blockers, MT5 bridge outages, and disk pressure. |
 
-Supersedence rules are conservative. `history_importer` blocks live updates, verifier/repair, checkpoint audit, and backup readiness for that cycle because it owns canonical writes and checkpoints during first-run/resume. A failed or warning UTC authority blocks ingestion and verification because canonical UTC cannot be trusted. Symbol metadata failures block ingestion and verification. Verifier or checkpoint warnings block backup readiness. Health failures block all MT5-dependent and data-quality agents. Dynamic supersedence persists across cycles until the source agent reports OK, so a failed UTC or symbol check cannot be bypassed merely because its next scheduled check is not due yet. A failed first-run importer is retried on the checkpoint-audit interval instead of being marked completed.
+Supersedence rules are conservative. `history_importer` blocks live updates, verifier/repair, checkpoint audit, and backup readiness for that cycle because it owns canonical writes and checkpoints during first-run/resume. A failed or warning UTC authority blocks ingestion and verification because canonical UTC cannot be trusted. Symbol metadata failures block ingestion and verification. Verifier or checkpoint warnings block backup readiness; this includes missing checkpoints, interrupted backfills, checkpoint MT5 symbol drift, canonical checkpoint mismatches, and live lag. Health failures block all MT5-dependent and data-quality agents. Dynamic supersedence persists across cycles until the source agent reports OK, so a failed UTC or symbol check cannot be bypassed merely because its next scheduled check is not due yet. A failed first-run importer is retried on the checkpoint-audit interval instead of being marked completed.
 
 Supervisor intervals are configured under `supervisor` in `Config/app.json`. The default production stance is to leave backfill disabled in the supervisor and run it deliberately, then use `supervise` for ongoing operation.
 

@@ -16,6 +16,9 @@ public struct CheckpointGapAuditAgent: ProductionAgent {
 
     public func run(context: AgentRuntimeContext, startedAt: Date) async throws -> AgentOutcome {
         let checkpointStore = context.checkpointStore()
+        var missingCheckpoints: [String] = []
+        var incompleteStates: [String] = []
+        var mt5SymbolMismatches: [String] = []
         var missingCanonical: [String] = []
         var staleSymbols: [String] = []
         var checked = 0
@@ -25,7 +28,15 @@ public struct CheckpointGapAuditAgent: ProductionAgent {
                 brokerSourceId: context.config.brokerTime.brokerSourceId,
                 logicalSymbol: mapping.logicalSymbol
             ) else {
+                missingCheckpoints.append(mapping.logicalSymbol.rawValue)
                 continue
+            }
+            guard state.mt5Symbol == mapping.mt5Symbol else {
+                mt5SymbolMismatches.append("\(mapping.logicalSymbol.rawValue):checkpoint=\(state.mt5Symbol.rawValue),configured=\(mapping.mt5Symbol.rawValue)")
+                continue
+            }
+            if state.status != .live {
+                incompleteStates.append("\(mapping.logicalSymbol.rawValue):status=\(state.status.rawValue)")
             }
             checked += 1
             let count = try await canonicalCheckpointCount(context: context, state: state)
@@ -44,7 +55,24 @@ public struct CheckpointGapAuditAgent: ProductionAgent {
         }
 
         let factory = AgentOutcomeFactory(kind: descriptor.kind, startedAt: startedAt)
-        let details = "checked=\(checked); missing=\(missingCanonical.joined(separator: "; ")); stale=\(staleSymbols.joined(separator: "; "))"
+        let details = [
+            "configured=\(context.config.symbols.symbols.count)",
+            "checked=\(checked)",
+            "missing_checkpoints=\(missingCheckpoints.joined(separator: "; "))",
+            "incomplete=\(incompleteStates.joined(separator: "; "))",
+            "mt5_symbol_mismatch=\(mt5SymbolMismatches.joined(separator: "; "))",
+            "canonical_mismatch=\(missingCanonical.joined(separator: "; "))",
+            "stale=\(staleSymbols.joined(separator: "; "))"
+        ].joined(separator: "; ")
+        if !missingCheckpoints.isEmpty {
+            return factory.warning("Configured symbols are missing ingest checkpoints", details: details)
+        }
+        if !incompleteStates.isEmpty {
+            return factory.warning("Configured symbols are not live after backfill", details: details)
+        }
+        if !mt5SymbolMismatches.isEmpty {
+            return factory.warning("Checkpoint MT5 symbol mapping does not match config", details: details)
+        }
         if !missingCanonical.isEmpty {
             return factory.warning("Checkpoint canonical row mismatch found", details: details)
         }

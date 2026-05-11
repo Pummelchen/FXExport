@@ -26,6 +26,13 @@ final class ProtocolTests: XCTestCase {
         XCTAssertThrowsError(try codec.decode(body, payloadType: EmptyPayload.self))
     }
 
+    func testFrameParserRejectsZeroLengthFrame() throws {
+        var parser = FrameParser()
+        XCTAssertThrowsError(try parser.append(Data([0, 0, 0, 0]))) { error in
+            XCTAssertEqual(error as? ProtocolError, .malformedLengthPrefix)
+        }
+    }
+
     func testProtocolAcceptsInt64TimestampField() throws {
         let codec = FramedProtocolCodec()
         let frame = try codec.encode(command: .ping, requestId: "abc", timestampSentUtc: .init(rawValue: 3_000_000_000), payload: EmptyPayload())

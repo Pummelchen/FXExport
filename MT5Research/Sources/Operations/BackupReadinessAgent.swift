@@ -19,6 +19,7 @@ public struct BackupReadinessAgent: ProductionAgent {
             if(count() = 0, 0, min(ts_utc)),
             if(count() = 0, 0, max(ts_utc))
         FROM \(database).ohlc_m1_canonical
+        WHERE broker_source_id = '\(SQLText.literal(context.config.brokerTime.brokerSourceId.rawValue))'
         FORMAT TabSeparated
         """
         let body = try await context.clickHouse.execute(.select(sql))
