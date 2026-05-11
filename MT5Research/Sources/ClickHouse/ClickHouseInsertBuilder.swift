@@ -66,8 +66,13 @@ public struct ClickHouseInsertBuilder: Sendable {
         ALTER TABLE \(database).ohlc_m1_canonical DELETE
         WHERE broker_source_id = '\(sqlLiteral(first.brokerSourceId.rawValue))'
           AND logical_symbol = '\(sqlLiteral(first.logicalSymbol.rawValue))'
-          AND mt5_server_ts_raw >= \(first.mt5ServerTime.rawValue)
-          AND mt5_server_ts_raw <= \(last.mt5ServerTime.rawValue)
+          AND (
+              (mt5_server_ts_raw >= \(first.mt5ServerTime.rawValue)
+               AND mt5_server_ts_raw <= \(last.mt5ServerTime.rawValue))
+              OR
+              (ts_utc >= \(first.utcTime.rawValue)
+               AND ts_utc <= \(last.utcTime.rawValue))
+          )
         SETTINGS mutations_sync = 1
         """
         return ClickHouseQuery.mutation(sql, idempotent: true)

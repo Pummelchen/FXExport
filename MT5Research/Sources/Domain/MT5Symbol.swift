@@ -9,8 +9,12 @@ public struct MT5Symbol: RawRepresentable, Codable, Hashable, Sendable, Comparab
         self.rawValue = trimmed
     }
 
-    public init(rawValue: String) {
-        self.rawValue = rawValue
+    public init?(rawValue: String) {
+        do {
+            try self.init(rawValue)
+        } catch {
+            return nil
+        }
     }
 
     public init(from decoder: Decoder) throws {

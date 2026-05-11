@@ -7,17 +7,6 @@ import MT5Bridge
 import TimeMapping
 import Validation
 
-public enum VerificationError: Error, CustomStringConvertible, Sendable {
-    case notImplemented(String)
-
-    public var description: String {
-        switch self {
-        case .notImplemented(let detail):
-            return "Verification capability is scaffolded but not fully wired: \(detail)"
-        }
-    }
-}
-
 public struct VerificationAgent: Sendable {
     private let config: ConfigBundle
     private let bridge: MT5BridgeClient?
@@ -64,6 +53,10 @@ public struct VerificationAgent: Sendable {
             logger.warn("Canonical rows with non-verified UTC offsets found: \(unverifiedCount.trimmingCharacters(in: .whitespacesAndNewlines))")
         }
 
+        guard randomRanges > 0 else {
+            logger.verify("Random historical cross-check disabled for this run")
+            return
+        }
         guard bridge != nil else {
             logger.warn("Random MT5 cross-check skipped because no MT5 bridge connection is active")
             return

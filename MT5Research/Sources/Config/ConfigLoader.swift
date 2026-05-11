@@ -90,7 +90,22 @@ public struct ConfigLoader: Sendable {
         guard Self.isSafeClickHouseIdentifier(clickHouse.database) else {
             throw ConfigError.invalidValue("ClickHouse database must contain only letters, digits, and underscores, and must not start with a digit")
         }
+        guard clickHouse.url.scheme == "http" || clickHouse.url.scheme == "https" else {
+            throw ConfigError.invalidValue("ClickHouse URL must use http or https")
+        }
+        guard Self.isReasonableTimeout(clickHouse.requestTimeoutSeconds) else {
+            throw ConfigError.invalidValue("ClickHouse requestTimeoutSeconds must be finite and between 0 and 3600 seconds")
+        }
+        guard clickHouse.retryCount >= 0 else {
+            throw ConfigError.invalidValue("ClickHouse retryCount must not be negative")
+        }
         guard !mt5Bridge.host.isEmpty else { throw ConfigError.invalidValue("MT5 bridge host is empty") }
+        guard Self.isReasonableTimeout(mt5Bridge.connectTimeoutSeconds) else {
+            throw ConfigError.invalidValue("MT5 bridge connectTimeoutSeconds must be finite and between 0 and 3600 seconds")
+        }
+        guard Self.isReasonableTimeout(mt5Bridge.requestTimeoutSeconds) else {
+            throw ConfigError.invalidValue("MT5 bridge requestTimeoutSeconds must be finite and between 0 and 3600 seconds")
+        }
         guard !symbols.symbols.isEmpty else { throw ConfigError.invalidValue("No symbols configured") }
         if let expected = brokerTime.expectedTerminalIdentity {
             if let company = expected.company, company.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -142,5 +157,9 @@ public struct ConfigLoader: Sendable {
         return value.allSatisfy { character in
             character == "_" || character.isLetter || character.isNumber
         }
+    }
+
+    private static func isReasonableTimeout(_ value: Double) -> Bool {
+        value.isFinite && value > 0 && value <= 3600
     }
 }

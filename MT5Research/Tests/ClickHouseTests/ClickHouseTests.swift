@@ -1,4 +1,4 @@
-import ClickHouse
+@testable import ClickHouse
 import Domain
 import XCTest
 
@@ -9,6 +9,13 @@ final class ClickHouseTests: XCTestCase {
         XCTAssertNil(parser.parseException(in: "1\n"))
     }
 
+    func testClickHouseBasicAuthorizationHeader() {
+        let header = ClickHouseHTTPClient.basicAuthorization(username: "default", password: "secret")
+        XCTAssertEqual(header, "Basic ZGVmYXVsdDpzZWNyZXQ=")
+        XCTAssertNil(ClickHouseHTTPClient.basicAuthorization(username: nil, password: "secret"))
+        XCTAssertNil(ClickHouseHTTPClient.basicAuthorization(username: "", password: "secret"))
+    }
+
     func testCanonicalRangeDeleteIsBrokerScopedAndSynchronous() throws {
         let bars = [try makeBar(mt5: 120, utc: 60), try makeBar(mt5: 180, utc: 120)]
         let query = try ClickHouseInsertBuilder(database: "db").canonicalRangeDelete(bars)
@@ -16,6 +23,8 @@ final class ClickHouseTests: XCTestCase {
         XCTAssertTrue(query.sql.contains("logical_symbol = 'EURUSD'"))
         XCTAssertTrue(query.sql.contains("mt5_server_ts_raw >= 120"))
         XCTAssertTrue(query.sql.contains("mt5_server_ts_raw <= 180"))
+        XCTAssertTrue(query.sql.contains("ts_utc >= 60"))
+        XCTAssertTrue(query.sql.contains("ts_utc <= 120"))
         XCTAssertTrue(query.sql.contains("mutations_sync = 1"))
         XCTAssertTrue(query.isIdempotent)
     }

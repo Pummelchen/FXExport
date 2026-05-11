@@ -47,19 +47,28 @@ public struct RepairAgent: Sendable {
                     throw RepairError.refused("replacement bars do not match the requested repair range or contain non-verified UTC offsets")
                 }
             }
+            let insertBuilder = ClickHouseInsertBuilder(database: database)
+            let insertQuery = try insertBuilder.canonicalBarsInsert(replacementBars)
+            guard let first = replacementBars.first, let last = replacementBars.last else {
+                throw RepairError.refused("replacement range is empty")
+            }
             let brokerSourceId = Self.sqlLiteral(range.brokerSourceId.rawValue)
             let symbol = Self.sqlLiteral(range.logicalSymbol.rawValue)
             let deleteSQL = """
             ALTER TABLE \(database).ohlc_m1_canonical DELETE
             WHERE broker_source_id = '\(brokerSourceId)'
               AND logical_symbol = '\(symbol)'
-              AND mt5_server_ts_raw >= \(range.mt5Start.rawValue)
-              AND mt5_server_ts_raw < \(range.mt5EndExclusive.rawValue)
+              AND (
+                  (mt5_server_ts_raw >= \(range.mt5Start.rawValue)
+                   AND mt5_server_ts_raw < \(range.mt5EndExclusive.rawValue))
+                  OR
+                  (ts_utc >= \(first.utcTime.rawValue)
+                   AND ts_utc <= \(last.utcTime.rawValue))
+              )
             SETTINGS mutations_sync = 1
             """
             _ = try await clickHouse.execute(.mutation(deleteSQL, idempotent: true))
-            let insertBuilder = ClickHouseInsertBuilder(database: database)
-            _ = try await clickHouse.execute(try insertBuilder.canonicalBarsInsert(replacementBars))
+            _ = try await clickHouse.execute(insertQuery)
             try await CanonicalInsertVerifier(clickHouse: clickHouse, insertBuilder: insertBuilder).verify(replacementBars)
         }
     }

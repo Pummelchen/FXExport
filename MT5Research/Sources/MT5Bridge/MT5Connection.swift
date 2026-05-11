@@ -13,6 +13,7 @@ public enum MT5BridgeError: Error, CustomStringConvertible, Sendable {
     case writeFailed(errno: Int32)
     case connectionClosed
     case invalidFrameLength(Int)
+    case invalidTimeout(Double)
 
     public var description: String {
         switch self {
@@ -38,6 +39,8 @@ public enum MT5BridgeError: Error, CustomStringConvertible, Sendable {
             return "MT5 bridge closed the socket."
         case .invalidFrameLength(let length):
             return "MT5 bridge sent invalid frame length \(length)."
+        case .invalidTimeout(let timeout):
+            return "Invalid MT5 bridge socket timeout \(timeout)."
         }
     }
 }
@@ -59,7 +62,12 @@ public final class MT5Connection: @unchecked Sendable {
     public static func connect(host: String, port: UInt16, timeoutSeconds: Double = 10, maxFrameBytes: Int = 16 * 1024 * 1024) throws -> MT5Connection {
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         guard fd >= 0 else { throw MT5BridgeError.socketCreateFailed(errno: errno) }
-        try configureTimeouts(fd: fd, timeoutSeconds: timeoutSeconds)
+        do {
+            try configureTimeouts(fd: fd, timeoutSeconds: timeoutSeconds)
+        } catch {
+            Darwin.close(fd)
+            throw error
+        }
 
         var address = try sockaddrIn(host: host, port: port)
         let result = withUnsafePointer(to: &address) { pointer in
@@ -99,7 +107,15 @@ public final class MT5Connection: @unchecked Sendable {
             throw MT5BridgeError.listenFailed(errno: savedErrno)
         }
 
-        guard try waitForReadable(fd: serverFD, timeoutSeconds: timeoutSeconds) else {
+        let isReadable: Bool
+        do {
+            isReadable = try waitForReadable(fd: serverFD, timeoutSeconds: timeoutSeconds)
+        } catch {
+            Darwin.close(serverFD)
+            throw error
+        }
+
+        guard isReadable else {
             Darwin.close(serverFD)
             throw MT5BridgeError.acceptTimedOut(port: port)
         }
@@ -109,7 +125,12 @@ public final class MT5Connection: @unchecked Sendable {
         let clientFD = Darwin.accept(serverFD, &clientAddress, &clientLength)
         Darwin.close(serverFD)
         guard clientFD >= 0 else { throw MT5BridgeError.acceptFailed(errno: errno) }
-        try configureTimeouts(fd: clientFD, timeoutSeconds: timeoutSeconds)
+        do {
+            try configureTimeouts(fd: clientFD, timeoutSeconds: timeoutSeconds)
+        } catch {
+            Darwin.close(clientFD)
+            throw error
+        }
         return MT5Connection(fd: clientFD, maxFrameBytes: maxFrameBytes)
     }
 
@@ -161,14 +182,24 @@ public final class MT5Connection: @unchecked Sendable {
     }
 
     private static func configureTimeouts(fd: Int32, timeoutSeconds: Double) throws {
+        guard timeoutSeconds.isFinite, timeoutSeconds > 0, timeoutSeconds <= 3600 else {
+            throw MT5BridgeError.invalidTimeout(timeoutSeconds)
+        }
         let seconds = Int(timeoutSeconds)
         let microseconds = Int((timeoutSeconds - Double(seconds)) * 1_000_000)
         var timeout = timeval(tv_sec: seconds, tv_usec: Int32(microseconds))
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
-        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        guard setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size)) == 0 else {
+            throw MT5BridgeError.readFailed(errno: errno)
+        }
+        guard setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size)) == 0 else {
+            throw MT5BridgeError.writeFailed(errno: errno)
+        }
     }
 
     private static func waitForReadable(fd: Int32, timeoutSeconds: Double) throws -> Bool {
+        guard timeoutSeconds.isFinite, timeoutSeconds > 0, timeoutSeconds <= 3600 else {
+            throw MT5BridgeError.invalidTimeout(timeoutSeconds)
+        }
         var pollDescriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
         let timeoutMilliseconds = Int32(max(0, timeoutSeconds * 1_000))
         let result = Darwin.poll(&pollDescriptor, 1, timeoutMilliseconds)

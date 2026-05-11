@@ -25,6 +25,12 @@ final class DomainTests: XCTestCase {
         XCTAssertEqual(mt5.rawValue, utc.rawValue)
     }
 
+    func testRawRepresentableSymbolInitializersDoNotBypassValidation() {
+        XCTAssertNil(LogicalSymbol(rawValue: "eurusd"))
+        XCTAssertNil(MT5Symbol(rawValue: ""))
+        XCTAssertNil(BrokerSourceId(rawValue: ""))
+    }
+
     func testBrokerServerIdentityRejectsEmptyIdentityParts() throws {
         XCTAssertThrowsError(try BrokerServerIdentity(company: "", server: "Broker-Demo", accountLogin: 1))
         XCTAssertThrowsError(try BrokerServerIdentity(company: "Broker", server: "", accountLogin: 1))

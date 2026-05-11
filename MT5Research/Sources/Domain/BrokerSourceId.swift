@@ -9,8 +9,12 @@ public struct BrokerSourceId: RawRepresentable, Codable, Hashable, Sendable, Com
         self.rawValue = trimmed
     }
 
-    public init(rawValue: String) {
-        self.rawValue = rawValue
+    public init?(rawValue: String) {
+        do {
+            try self.init(rawValue)
+        } catch {
+            return nil
+        }
     }
 
     public init(from decoder: Decoder) throws {

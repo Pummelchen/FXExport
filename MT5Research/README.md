@@ -71,6 +71,8 @@ cp ConfigSamples/symbols.sample.json Config/symbols.json
 
 Edit every file before production use.
 
+ClickHouse credentials belong only in local ignored files under `Config/`. The Swift HTTP client sends credentials with an HTTP Basic Authorization header and does not put the password into the request URL.
+
 ### Symbols
 
 `Config/symbols.json` explicitly maps logical symbols to MT5 broker symbols:
@@ -155,7 +157,7 @@ This creates:
 
 Raw audit data is append-only. Repairs only target canonical data and must preserve conflicts and repair logs.
 
-Canonical ingestion is replace-by-range for the affected broker/source/symbol range. After the replacement insert, Swift reads the canonical range back from ClickHouse and verifies row count plus unique MT5 and UTC timestamp counts before advancing the checkpoint. This prevents duplicate canonical bars after a crash between insert and checkpoint update. Raw audit rows remain append-only.
+Canonical ingestion is replace-by-range for the affected broker/source/symbol range. The delete predicate covers both the raw MT5 server-time range and the converted UTC identity range before reinserting verified rows. After the replacement insert, Swift reads the canonical range back from ClickHouse and verifies row count plus unique MT5 and UTC timestamp counts before advancing the checkpoint. This prevents duplicate canonical bars after a crash between insert and checkpoint update, and also catches older rows written under a wrong UTC mapping. Raw audit rows remain append-only.
 
 ## MT5 EA Setup
 

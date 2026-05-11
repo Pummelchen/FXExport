@@ -191,9 +191,12 @@ public struct BackfillAgent: Sendable {
 
     private func insertValidatedBars(_ bars: [ValidatedBar], insertBuilder: ClickHouseInsertBuilder) async throws {
         guard !bars.isEmpty else { return }
-        _ = try await clickHouse.execute(insertBuilder.rawBarsInsert(bars))
-        _ = try await clickHouse.execute(try insertBuilder.canonicalRangeDelete(bars))
-        _ = try await clickHouse.execute(try insertBuilder.canonicalBarsInsert(bars))
+        let rawInsert = insertBuilder.rawBarsInsert(bars)
+        let canonicalDelete = try insertBuilder.canonicalRangeDelete(bars)
+        let canonicalInsert = try insertBuilder.canonicalBarsInsert(bars)
+        _ = try await clickHouse.execute(rawInsert)
+        _ = try await clickHouse.execute(canonicalDelete)
+        _ = try await clickHouse.execute(canonicalInsert)
         try await CanonicalInsertVerifier(clickHouse: clickHouse, insertBuilder: insertBuilder).verify(bars)
     }
 

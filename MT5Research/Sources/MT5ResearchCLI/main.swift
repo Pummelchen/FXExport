@@ -251,6 +251,7 @@ struct CLIOptions {
         var symbolsArgument: String?
         var randomRanges: Int?
         var requiresBridge = command == .verify
+        var noBridgeRequested = false
 
         var index = 1
         while index < arguments.count {
@@ -274,9 +275,8 @@ struct CLIOptions {
                     throw CLIError.invalidValue(arg)
                 }
                 randomRanges = value
-                requiresBridge = value > 0
             case "--no-bridge":
-                requiresBridge = false
+                noBridgeRequested = true
             case "--verbose":
                 overrideLogLevel = .verbose
             case "--debug":
@@ -288,6 +288,10 @@ struct CLIOptions {
                 throw CLIError.unknownOption(arg)
             }
             index += 1
+        }
+
+        if command == .verify {
+            requiresBridge = !noBridgeRequested && (randomRanges.map { $0 > 0 } ?? true)
         }
 
         self.configDirectory = configDirectory

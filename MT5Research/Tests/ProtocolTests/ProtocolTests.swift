@@ -25,4 +25,26 @@ final class ProtocolTests: XCTestCase {
         body = try XCTUnwrap(tampered.data(using: .utf8))
         XCTAssertThrowsError(try codec.decode(body, payloadType: EmptyPayload.self))
     }
+
+    func testProtocolAcceptsInt64TimestampField() throws {
+        let codec = FramedProtocolCodec()
+        let frame = try codec.encode(command: .ping, requestId: "abc", timestampSentUtc: .init(rawValue: 3_000_000_000), payload: EmptyPayload())
+        var parser = FrameParser()
+        let bodies = try parser.append(frame)
+        let message = try codec.decode(bodies[0], payloadType: EmptyPayload.self)
+        XCTAssertEqual(message.timestampSentUtc.rawValue, 3_000_000_000)
+    }
+
+    func testProtocolRejectsBooleanNumericField() throws {
+        let codec = FramedProtocolCodec()
+        let frame = try codec.encode(command: .ping, requestId: "abc", timestampSentUtc: .init(rawValue: 1), payload: EmptyPayload())
+        var parser = FrameParser()
+        let bodies = try parser.append(frame)
+        let text = try XCTUnwrap(String(data: bodies[0], encoding: .utf8))
+        let tampered = text.replacingOccurrences(of: "\"timestamp_sent_utc\":1", with: "\"timestamp_sent_utc\":true")
+        let body = try XCTUnwrap(tampered.data(using: .utf8))
+        XCTAssertThrowsError(try codec.decode(body, payloadType: EmptyPayload.self)) { error in
+            XCTAssertEqual(error as? ProtocolError, .invalidField("timestamp_sent_utc"))
+        }
+    }
 }

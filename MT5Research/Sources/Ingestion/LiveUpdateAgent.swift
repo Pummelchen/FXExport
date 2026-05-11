@@ -122,9 +122,12 @@ public struct LiveUpdateAgent: Sendable {
         )
         let validated = try validator.validateBatch(closedBars, context: context)
         guard !validated.isEmpty else { return }
-        _ = try await clickHouse.execute(insertBuilder.rawBarsInsert(validated))
-        _ = try await clickHouse.execute(try insertBuilder.canonicalRangeDelete(validated))
-        _ = try await clickHouse.execute(try insertBuilder.canonicalBarsInsert(validated))
+        let rawInsert = insertBuilder.rawBarsInsert(validated)
+        let canonicalDelete = try insertBuilder.canonicalRangeDelete(validated)
+        let canonicalInsert = try insertBuilder.canonicalBarsInsert(validated)
+        _ = try await clickHouse.execute(rawInsert)
+        _ = try await clickHouse.execute(canonicalDelete)
+        _ = try await clickHouse.execute(canonicalInsert)
         try await CanonicalInsertVerifier(clickHouse: clickHouse, insertBuilder: insertBuilder).verify(validated)
         guard let last = validated.last else { return }
         try await checkpointStore.save(IngestState(

@@ -118,13 +118,17 @@ public struct FramedProtocolCodec: Sendable {
         let schemaVersion = try Self.requiredInt("schema_version", in: object)
         guard schemaVersion == Self.schemaVersion else { throw ProtocolError.unsupportedSchemaVersion(schemaVersion) }
         let requestId = try Self.requiredString("request_id", in: object)
+        guard !requestId.isEmpty else { throw ProtocolError.invalidField("request_id") }
         let commandText = try Self.requiredString("command", in: object)
         guard let command = MT5Command(rawValue: commandText) else { throw ProtocolError.unknownCommand(commandText) }
-        let timestampSentUtc = UtcSecond(rawValue: Int64(try Self.requiredInt("timestamp_sent_utc", in: object)))
+        let timestampSentUtc = UtcSecond(rawValue: try Self.requiredInt64("timestamp_sent_utc", in: object))
         let expectedPayloadLength = try Self.requiredInt("payload_length", in: object)
+        guard expectedPayloadLength >= 0, expectedPayloadLength <= maxFrameBytes else {
+            throw ProtocolError.invalidField("payload_length")
+        }
         let expectedPayloadChecksum = try Self.requiredString("payload_checksum", in: object)
-        let errorCode = Self.optionalString("error_code", in: object)
-        let errorMessage = Self.optionalString("error_message", in: object)
+        let errorCode = try Self.optionalString("error_code", in: object)
+        let errorMessage = try Self.optionalString("error_message", in: object)
 
         let payloadData = try Self.extractPayloadBytes(from: jsonText)
         guard payloadData.count == expectedPayloadLength else {
@@ -220,14 +224,41 @@ public struct FramedProtocolCodec: Sendable {
         return string
     }
 
-    private static func optionalString(_ key: String, in object: [String: Any]) -> String? {
-        object[key] as? String
+    private static func optionalString(_ key: String, in object: [String: Any]) throws -> String? {
+        guard let value = object[key], !(value is NSNull) else { return nil }
+        guard let string = value as? String else { throw ProtocolError.invalidField(key) }
+        return string
     }
 
     private static func requiredInt(_ key: String, in object: [String: Any]) throws -> Int {
+        let value = try requiredInt64(key, in: object)
+        guard value >= Int64(Int.min), value <= Int64(Int.max) else {
+            throw ProtocolError.invalidField(key)
+        }
+        return Int(value)
+    }
+
+    private static func requiredInt64(_ key: String, in object: [String: Any]) throws -> Int64 {
         guard let value = object[key] else { throw ProtocolError.missingField(key) }
-        if let int = value as? Int { return int }
-        if let number = value as? NSNumber { return number.intValue }
+        if let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() {
+            throw ProtocolError.invalidField(key)
+        }
+        if let int = value as? Int { return Int64(int) }
+        if let int64 = value as? Int64 { return int64 }
+        if let number = value as? NSNumber {
+            let doubleValue = number.doubleValue
+            guard doubleValue.isFinite,
+                  doubleValue.rounded(.towardZero) == doubleValue,
+                  doubleValue >= Double(Int64.min),
+                  doubleValue <= Double(Int64.max) else {
+                throw ProtocolError.invalidField(key)
+            }
+            let int64Value = number.int64Value
+            guard Double(int64Value) == doubleValue else {
+                throw ProtocolError.invalidField(key)
+            }
+            return int64Value
+        }
         throw ProtocolError.invalidField(key)
     }
 

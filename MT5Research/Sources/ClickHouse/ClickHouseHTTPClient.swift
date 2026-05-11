@@ -39,12 +39,6 @@ public struct ClickHouseHTTPClient: ClickHouseClientProtocol, Sendable {
         if !database.isEmpty {
             queryItems.append(URLQueryItem(name: "database", value: database))
         }
-        if let username = config.username {
-            queryItems.append(URLQueryItem(name: "user", value: username))
-        }
-        if let password = config.password {
-            queryItems.append(URLQueryItem(name: "password", value: password))
-        }
         components?.queryItems = queryItems
         guard let url = components?.url else { throw ClickHouseError.invalidURL(config.url.absoluteString) }
 
@@ -52,6 +46,9 @@ public struct ClickHouseHTTPClient: ClickHouseClientProtocol, Sendable {
         request.httpMethod = "POST"
         request.timeoutInterval = config.requestTimeoutSeconds
         request.httpBody = query.sql.data(using: .utf8)
+        if let authorization = Self.basicAuthorization(username: config.username, password: config.password) {
+            request.setValue(authorization, forHTTPHeaderField: "Authorization")
+        }
 
         let data: Data
         let response: URLResponse
@@ -72,5 +69,13 @@ public struct ClickHouseHTTPClient: ClickHouseClientProtocol, Sendable {
             throw exception
         }
         return body
+    }
+
+    static func basicAuthorization(username: String?, password: String?) -> String? {
+        guard let username, !username.isEmpty else { return nil }
+        let password = password ?? ""
+        let token = "\(username):\(password)"
+        guard let tokenData = token.data(using: .utf8) else { return nil }
+        return "Basic \(tokenData.base64EncodedString())"
     }
 }

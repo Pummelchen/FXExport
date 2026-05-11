@@ -114,10 +114,17 @@ void HandleRequest(const string json)
    string payload = ExtractPayload(json);
    string expectedChecksum = JsonStringField(json, "payload_checksum");
    int expectedLength = (int)JsonLongField(json, "payload_length");
+   long schemaVersion = JsonLongField(json, "schema_version");
 
    if(requestId == "" || command == "" || payload == "")
    {
       SendError(requestId, command, "PROTOCOL_ERROR", "Missing request_id, command, or payload");
+      return;
+   }
+
+   if(schemaVersion != 1)
+   {
+      SendError(requestId, command, "UNSUPPORTED_SCHEMA_VERSION", "Expected schema_version 1");
       return;
    }
 
@@ -272,8 +279,22 @@ void HandleRatesRange(const string requestId, const string command, const string
    long fromTs = JsonLongField(payload, "from_mt5_server_ts");
    long toExclusive = JsonLongField(payload, "to_mt5_server_ts_exclusive");
    int maxBars = (int)JsonLongField(payload, "max_bars");
-   if(maxBars <= 0 || maxBars > MaxBarsPerResponse)
-      maxBars = MaxBarsPerResponse;
+   int responseLimit = MaxBarsPerResponse;
+   if(responseLimit <= 0)
+      responseLimit = 50000;
+
+   if(symbol == "")
+   {
+      SendError(requestId, command, "PROTOCOL_ERROR", "GET_RATES_RANGE missing mt5_symbol");
+      return;
+   }
+   if(fromTs <= 0 || toExclusive <= fromTs)
+   {
+      SendError(requestId, command, "PROTOCOL_ERROR", "GET_RATES_RANGE invalid time range");
+      return;
+   }
+   if(maxBars <= 0 || maxBars > responseLimit)
+      maxBars = responseLimit;
 
    MqlRates latest[];
    ArraySetAsSeries(latest, true);
@@ -284,6 +305,11 @@ void HandleRatesRange(const string requestId, const string command, const string
    }
    long latestClosed = (long)latest[0].time;
    long safeToExclusive = (toExclusive < latestClosed + 60 ? toExclusive : latestClosed + 60);
+   if(safeToExclusive <= fromTs)
+   {
+      SendOK(requestId, command, "{\"mt5_symbol\":\"" + JsonEscape(symbol) + "\",\"timeframe\":\"M1\",\"rates\":[]}");
+      return;
+   }
 
    MqlRates rates[];
    ArraySetAsSeries(rates, false);
