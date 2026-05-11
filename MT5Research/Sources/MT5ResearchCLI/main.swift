@@ -7,6 +7,7 @@ import Foundation
 import Ingestion
 import MetalAccel
 import MT5Bridge
+import Operations
 import TimeMapping
 import Verification
 
@@ -110,6 +111,29 @@ struct MT5ResearchCLI {
                 ).runForever()
                 return .success
 
+            case .supervise:
+                let lock = try SupervisorLock.acquireDefault(
+                    brokerSourceId: config.brokerTime.brokerSourceId.rawValue
+                )
+                logger.ok("Supervisor lock acquired: \(lock.path)")
+                let eventStore = ClickHouseAgentEventStore(
+                    clickHouse: clickHouse,
+                    database: config.clickHouse.database
+                )
+                let supervisor = ProductionSupervisor(
+                    config: config,
+                    clickHouse: clickHouse,
+                    eventStore: eventStore,
+                    logger: logger,
+                    bridgeConnector: {
+                        try connectBridge(config: config, logger: logger)
+                    },
+                    runBackfillOnStart: options.runBackfillOnStart ?? config.app.supervisor.runBackfillOnStart
+                )
+                try await supervisor.run(maxCycles: options.supervisorCycles)
+                _ = lock
+                return .success
+
             case .verify:
                 let bridge: MT5BridgeClient?
                 if options.requiresBridge {
@@ -159,6 +183,9 @@ struct MT5ResearchCLI {
             return .configuration
         } catch let error as BrokerOffsetRuntimeError {
             print("[ERROR] Broker UTC offset: \(error.description)")
+            return .configuration
+        } catch let error as SupervisorError {
+            print("[ERROR] Supervisor: \(error.description)")
             return .configuration
         } catch let error as TimeMappingError {
             print("[ERROR] Broker UTC offset: \(error.description)")
@@ -324,6 +351,7 @@ struct MT5ResearchCLI {
           backfill --symbols all
           backfill --symbols EURUSD,USDJPY
           live
+          supervise [--with-backfill] [--supervisor-cycles N]
           verify
           verify --random-ranges 20
           repair --symbol EURUSD --from 2020-01-01 --to 2020-02-01
@@ -346,6 +374,7 @@ enum Command: Equatable {
     case symbolCheck
     case backfill
     case live
+    case supervise
     case verify
     case repair
     case exportCache
@@ -365,6 +394,8 @@ struct CLIOptions {
     let fromUtcDay: UtcSecond?
     let toUtcDay: UtcSecond?
     let requiresBridge: Bool
+    let runBackfillOnStart: Bool?
+    let supervisorCycles: Int?
 
     init(arguments: [String]) throws {
         guard let first = arguments.first else {
@@ -378,6 +409,8 @@ struct CLIOptions {
             self.fromUtcDay = nil
             self.toUtcDay = nil
             self.requiresBridge = false
+            self.runBackfillOnStart = nil
+            self.supervisorCycles = nil
             return
         }
 
@@ -392,6 +425,8 @@ struct CLIOptions {
         var toUtcDay: UtcSecond?
         var requiresBridge = command == .verify
         var noBridgeRequested = false
+        var runBackfillOnStart: Bool?
+        var supervisorCycles: Int?
 
         var index = 1
         while index < arguments.count {
@@ -429,6 +464,16 @@ struct CLIOptions {
                 toUtcDay = try MT5ResearchCLI.parseUtcDay(arguments[index])
             case "--no-bridge":
                 noBridgeRequested = true
+            case "--with-backfill":
+                runBackfillOnStart = true
+            case "--without-backfill":
+                runBackfillOnStart = false
+            case "--supervisor-cycles":
+                index += 1
+                guard index < arguments.count, let value = Int(arguments[index]), value > 0 else {
+                    throw CLIError.invalidValue(arg)
+                }
+                supervisorCycles = value
             case "--verbose":
                 overrideLogLevel = .verbose
             case "--debug":
@@ -458,6 +503,8 @@ struct CLIOptions {
         self.fromUtcDay = fromUtcDay
         self.toUtcDay = toUtcDay
         self.requiresBridge = requiresBridge
+        self.runBackfillOnStart = runBackfillOnStart
+        self.supervisorCycles = supervisorCycles
     }
 
     private static func parseCommand(_ value: String) throws -> Command {
@@ -467,6 +514,7 @@ struct CLIOptions {
         case "symbol-check": return .symbolCheck
         case "backfill": return .backfill
         case "live": return .live
+        case "supervise": return .supervise
         case "verify": return .verify
         case "repair": return .repair
         case "export-cache": return .exportCache

@@ -86,6 +86,7 @@ public struct ConfigLoader: Sendable {
         guard app.liveScanIntervalSeconds > 0 else {
             throw ConfigError.invalidValue("live_scan_interval_seconds must be greater than zero")
         }
+        try validateSupervisor(app.supervisor)
         guard !clickHouse.database.isEmpty else { throw ConfigError.invalidValue("ClickHouse database is empty") }
         guard Self.isSafeClickHouseIdentifier(clickHouse.database) else {
             throw ConfigError.invalidValue("ClickHouse database must contain only letters, digits, and underscores, and must not start with a digit")
@@ -164,6 +165,25 @@ public struct ConfigLoader: Sendable {
         guard let first = value.first, first == "_" || first.isLetter else { return false }
         return value.allSatisfy { character in
             character == "_" || character.isLetter || character.isNumber
+        }
+    }
+
+    private func validateSupervisor(_ supervisor: SupervisorConfig) throws {
+        let intervals = [
+            ("supervisor.cycle_seconds", supervisor.cycleSeconds),
+            ("supervisor.health_check_interval_seconds", supervisor.healthCheckIntervalSeconds),
+            ("supervisor.utc_check_interval_seconds", supervisor.utcCheckIntervalSeconds),
+            ("supervisor.verification_interval_seconds", supervisor.verificationIntervalSeconds),
+            ("supervisor.symbol_metadata_check_interval_seconds", supervisor.symbolMetadataCheckIntervalSeconds),
+            ("supervisor.checkpoint_audit_interval_seconds", supervisor.checkpointAuditIntervalSeconds),
+            ("supervisor.backup_check_interval_seconds", supervisor.backupCheckIntervalSeconds),
+            ("supervisor.alert_interval_seconds", supervisor.alertIntervalSeconds),
+            ("supervisor.stale_live_warning_seconds", supervisor.staleLiveWarningSeconds)
+        ]
+        for (name, value) in intervals {
+            guard value > 0 else {
+                throw ConfigError.invalidValue("\(name) must be greater than zero")
+            }
         }
     }
 

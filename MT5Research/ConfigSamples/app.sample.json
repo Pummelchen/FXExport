@@ -3,5 +3,18 @@
   "live_scan_interval_seconds": 10,
   "log_level": "normal",
   "strict_symbol_failures": false,
-  "verifier_random_ranges": 1
+  "verifier_random_ranges": 1,
+  "supervisor": {
+    "cycle_seconds": 10,
+    "health_check_interval_seconds": 30,
+    "utc_check_interval_seconds": 60,
+    "verification_interval_seconds": 3600,
+    "symbol_metadata_check_interval_seconds": 300,
+    "checkpoint_audit_interval_seconds": 300,
+    "backup_check_interval_seconds": 3600,
+    "alert_interval_seconds": 30,
+    "stale_live_warning_seconds": 180,
+    "run_backfill_on_start": false,
+    "repair_on_verifier_mismatch": true
+  }
 }

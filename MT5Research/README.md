@@ -105,6 +105,18 @@ swift build -c release
 .build/release/mt5research live --config-dir Config
 ```
 
+For production operation, prefer the supervised runtime instead of running `live` alone:
+
+```bash
+.build/release/mt5research supervise --config-dir Config
+```
+
+If the first historical import should be owned by the supervisor, start it explicitly:
+
+```bash
+.build/release/mt5research supervise --config-dir Config --with-backfill
+```
+
 ## Configuration
 
 Copy the sample configs:
@@ -205,6 +217,8 @@ This creates:
 - `ingest_state`
 - `verification_results`
 - `repair_log`
+- `runtime_agent_events`
+- `runtime_agent_state`
 
 Raw audit data is append-only. Repairs only target canonical data and must preserve conflicts and repair logs.
 
@@ -221,7 +235,7 @@ Safe recovery sequence:
 .build/release/mt5research verify --config-dir Config --random-ranges 0
 .build/release/mt5research backfill --config-dir Config --symbols all
 .build/release/mt5research verify --config-dir Config --random-ranges 20
-.build/release/mt5research live --config-dir Config
+.build/release/mt5research supervise --config-dir Config
 ```
 
 Backfill is designed to be rerun. A checkpoint is advanced only after raw insert, canonical range replacement, canonical insert, and canonical readback verification all succeed. If the process crashes before that point, rerunning backfill starts again from the last verified checkpoint. Canonical rows for the retried range are deleted and reinserted by both MT5 server-time range and UTC identity range, so duplicate canonical bars should not accumulate.
@@ -252,6 +266,9 @@ swift run mt5research symbol-check
 swift run mt5research backfill --symbols all
 swift run mt5research backfill --symbols EURUSD,USDJPY
 swift run mt5research live
+swift run mt5research supervise
+swift run mt5research supervise --with-backfill
+swift run mt5research supervise --supervisor-cycles 1
 swift run mt5research verify
 swift run mt5research verify --random-ranges 20
 swift run mt5research repair --symbol EURUSD --from 2020-01-01 --to 2020-02-01
@@ -271,6 +288,25 @@ Global options:
 
 `repair --from` and `--to` are UTC dates in `YYYY-MM-DD` format. Repair first verifies the requested range against MT5, repairs canonical rows only when the mismatch is unambiguous and UTC mapping is verified, writes `repair_log`, and then verifies the range again. Raw audit rows are never deleted.
 
+## Production Supervisor Agents
+
+`supervise` runs ten operational agents through one sequential supervisor. The supervisor owns the single MT5 bridge connection, uses a per-broker lock so two supervisors cannot run against the same broker source, records agent events in ClickHouse, and keeps retryable failures from advancing ingestion checkpoints.
+
+The agents are:
+
+1. `history_importer` - optional first-run/resume backfill, enabled with `--with-backfill` or `supervisor.run_backfill_on_start`.
+2. `live_m1_updater` - 10 second closed-M1 ingestion loop.
+3. `database_verifier_repairer` - DB checks plus MT5 random range cross-checks and canonical-only repair when unambiguous.
+4. `utc_time_authority` - verifies live broker server offset against DB-backed verified offset segments for the exact terminal identity.
+5. `health_monitor` - checks ClickHouse and MT5 bridge reachability.
+6. `supervisor_coordinator` - confirms single bridge ownership and sequential MT5 access are active.
+7. `symbol_metadata_drift` - checks configured MT5 symbols and digit metadata for drift.
+8. `checkpoint_gap_auditor` - checks checkpoint/canonical consistency and warns when live ingestion falls behind MT5.
+9. `backup_readiness` - verifies canonical data exists for backup/export workflows.
+10. `alerting` - summarizes recent supervisor warnings/errors from `runtime_agent_events`.
+
+Supervisor intervals are configured under `supervisor` in `Config/app.json`. The default production stance is to leave backfill disabled in the supervisor and run it deliberately, then use `supervise` for ongoing operation.
+
 ## Current Implementation Status
 
 Implemented:
@@ -285,6 +321,7 @@ Implemented:
 - TCP socket transport in Swift.
 - ClickHouse HTTP client and migrations.
 - Backfill/live update agents with checkpoint-after-canonical-readback flow and canonical range replacement.
+- Production supervisor with ten operational agents and runtime event/state tables.
 - Startup verifier checks plus random historical MT5-vs-ClickHouse range comparison.
 - Canonical-only repair command with verify -> repair -> reverify flow.
 - CPU backtest scaffold using columnar arrays.
