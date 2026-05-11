@@ -25,6 +25,10 @@ struct MT5ResearchCLI {
                 printUsage()
                 return .success
             }
+            if options.command == .failureGuide {
+                print(OperationalFailureGuide.catalogText())
+                return .success
+            }
 
             let loader = ConfigLoader()
             let config = try loader.loadBundle(configDirectory: options.configDirectory)
@@ -39,6 +43,10 @@ struct MT5ResearchCLI {
             }
 
             switch options.command {
+            case .failureGuide:
+                print(OperationalFailureGuide.catalogText())
+                return .success
+
             case .migrate:
                 logger.db("Connecting to ClickHouse at \(config.clickHouse.url.absoluteString)")
                 _ = try await clickHouse.execute(.select("SELECT 1", databaseOverride: "default"))
@@ -116,21 +124,11 @@ struct MT5ResearchCLI {
                     owner: "live"
                 )
                 logger.ok("Broker runtime lock acquired: \(lock.path)")
-                let bridge = try connectBridge(config: config, logger: logger)
-                let checkpointStore = ClickHouseCheckpointStore(
-                    client: clickHouse,
-                    insertBuilder: ClickHouseInsertBuilder(database: config.clickHouse.database),
-                    database: config.clickHouse.database
-                )
-                let offsetStore = ClickHouseBrokerOffsetStore(client: clickHouse, database: config.clickHouse.database)
-                try await LiveUpdateAgent(
+                try await runLiveWithRecovery(
                     config: config,
-                    bridge: bridge,
                     clickHouse: clickHouse,
-                    checkpointStore: checkpointStore,
-                    offsetStore: offsetStore,
                     logger: logger
-                ).runForever()
+                )
                 _ = lock
                 return .success
 
@@ -239,29 +237,36 @@ struct MT5ResearchCLI {
             printUsage()
             return .usage
         } catch let error as ConfigError {
-            print("[ERROR] \(error.description)")
+            print("[ERROR] Configuration problem")
+            print(OperationalFailureGuide.advice(for: error).formatted)
             return .configuration
         } catch let error as TerminalIdentityPolicyError {
-            print("[ERROR] \(error.description)")
+            print("[ERROR] MT5 terminal identity problem")
+            print(OperationalFailureGuide.advice(for: error).formatted)
             return .configuration
         } catch let error as BrokerOffsetRuntimeError {
-            print("[ERROR] Broker UTC offset: \(error.description)")
+            print("[ERROR] Broker UTC offset problem")
+            print(OperationalFailureGuide.advice(for: error).formatted)
             return .configuration
         } catch let error as ClickHouseStartupError {
             print("[ERROR] ClickHouse startup check failed")
-            print(error.description)
+            print(OperationalFailureGuide.advice(for: error).formatted)
             return .clickHouse
         } catch let error as SupervisorError {
             print("[ERROR] Runtime lock: \(error.description)")
+            print(OperationalFailureGuide.advice(for: error).formatted)
             return .configuration
         } catch let error as BacktestReadinessError {
-            print("[ERROR] Backtest readiness: \(error.description)")
+            print("[ERROR] Backtest readiness blocked")
+            print(OperationalFailureGuide.advice(for: error).formatted)
             return .backtest
         } catch let error as TimeMappingError {
-            print("[ERROR] Broker UTC offset: \(error.description)")
+            print("[ERROR] Broker UTC offset problem")
+            print(OperationalFailureGuide.advice(for: error).formatted)
             return .configuration
         } catch let error as VerificationError {
-            print("[ERROR] Verification: \(error.description)")
+            print("[ERROR] Verification failed")
+            print(OperationalFailureGuide.advice(for: error).formatted)
             return .verification
         } catch let error as MT5BridgeStartupError {
             print("[ERROR] MT5 bridge startup check failed")
@@ -269,28 +274,15 @@ struct MT5ResearchCLI {
             return .mt5Bridge
         } catch let error as ProtocolError {
             print("[ERROR] MT5 bridge protocol check failed")
-            print("""
-            Reason: \(error.description)
-            Next steps:
-              1. Recompile the EA: mt5research startcheck --config-dir Config --migrations-dir Migrations --skip-bridge
-              2. Reattach HistoryBridgeEA in MT5.
-              3. Rerun: mt5research startcheck --config-dir Config --migrations-dir Migrations
-            """)
+            print(OperationalFailureGuide.advice(for: error).formatted)
             return .mt5Bridge
         } catch let error as MT5BridgeError {
             print("[ERROR] MT5 bridge is not ready")
-            print("Reason: \(error.description)")
-            print("Next step: run `mt5research startcheck --config-dir Config --migrations-dir Migrations` for guided MT5/EA checks.")
+            print(OperationalFailureGuide.advice(for: error).formatted)
             return .mt5Bridge
         } catch let error as ClickHouseError {
             print("[ERROR] ClickHouse operation failed")
-            print("""
-            Reason: \(error.description)
-            Next steps:
-              1. Run: mt5research startcheck --config-dir Config --migrations-dir Migrations
-              2. If ClickHouse is stopped, the startup check will try to start it automatically.
-              3. If authentication fails, fix Config/clickhouse.json and keep the password only in that local ignored file.
-            """)
+            print(OperationalFailureGuide.advice(for: error).formatted)
             return .clickHouse
         } catch {
             print("[ERROR] \(error)")
@@ -334,6 +326,95 @@ struct MT5ResearchCLI {
             return try JSONDecoder().decode(BacktestConfigFile.self, from: data)
         } catch {
             throw ConfigError.invalidFile(url, error.localizedDescription)
+        }
+    }
+
+    private static func runLiveWithRecovery(
+        config: ConfigBundle,
+        clickHouse: ClickHouseClientProtocol,
+        logger: Logger
+    ) async throws {
+        let checkpointStore = ClickHouseCheckpointStore(
+            client: clickHouse,
+            insertBuilder: ClickHouseInsertBuilder(database: config.clickHouse.database),
+            database: config.clickHouse.database
+        )
+        let offsetStore = ClickHouseBrokerOffsetStore(client: clickHouse, database: config.clickHouse.database)
+        let scanNanoseconds = UInt64(config.app.liveScanIntervalSeconds) * 1_000_000_000
+        var bridgeBackoffSeconds: UInt64 = 5
+        var clickHouseBackoffSeconds = UInt64(max(10, config.app.liveScanIntervalSeconds))
+
+        logger.info("Starting resilient live updater; scan interval \(config.app.liveScanIntervalSeconds)s")
+        while !Task.isCancelled {
+            do {
+                let bridge = try connectBridge(config: config, logger: logger)
+                bridgeBackoffSeconds = 5
+                clickHouseBackoffSeconds = UInt64(max(10, config.app.liveScanIntervalSeconds))
+                let agent = LiveUpdateAgent(
+                    config: config,
+                    bridge: bridge,
+                    clickHouse: clickHouse,
+                    checkpointStore: checkpointStore,
+                    offsetStore: offsetStore,
+                    logger: logger
+                )
+                while !Task.isCancelled {
+                    do {
+                        try await agent.runOnce()
+                        try await Task.sleep(nanoseconds: scanNanoseconds)
+                    } catch let error as MT5BridgeError {
+                        logger.warn("MT5 bridge disconnected; will reconnect. \(error.description)")
+                        break
+                    } catch let error as ProtocolError {
+                        logger.warn("MT5 bridge protocol failed; will reconnect after EA check. \(error.description)")
+                        logger.verbose(OperationalFailureGuide.advice(for: error).formatted)
+                        break
+                    } catch let error as ClickHouseError {
+                        logger.warn("ClickHouse failed during live update; attempting local recovery")
+                        logger.verbose(OperationalFailureGuide.advice(for: error).formatted)
+                        if await recoverClickHouse(config: config, clickHouse: clickHouse, logger: logger) {
+                            clickHouseBackoffSeconds = UInt64(max(10, config.app.liveScanIntervalSeconds))
+                            try await Task.sleep(nanoseconds: scanNanoseconds)
+                        } else {
+                            logger.warn("ClickHouse is still unavailable; retrying database recovery in \(clickHouseBackoffSeconds)s")
+                            try await Task.sleep(nanoseconds: clickHouseBackoffSeconds * 1_000_000_000)
+                            clickHouseBackoffSeconds = min(300, clickHouseBackoffSeconds * 2)
+                        }
+                    } catch {
+                        logger.warn("Live update cycle failed safely; checkpoint was not advanced unless readback verification already passed")
+                        logger.verbose(OperationalFailureGuide.advice(for: error).formatted)
+                        try await Task.sleep(nanoseconds: scanNanoseconds)
+                    }
+                }
+            } catch let error as MT5BridgeStartupError {
+                logger.warn("MT5 bridge unavailable; retrying in \(bridgeBackoffSeconds)s")
+                logger.verbose(error.description)
+            } catch let error as MT5BridgeError {
+                logger.warn("MT5 bridge unavailable; retrying in \(bridgeBackoffSeconds)s")
+                logger.verbose(OperationalFailureGuide.advice(for: error).formatted)
+            }
+
+            try await Task.sleep(nanoseconds: bridgeBackoffSeconds * 1_000_000_000)
+            bridgeBackoffSeconds = min(300, bridgeBackoffSeconds * 2)
+        }
+    }
+
+    private static func recoverClickHouse(
+        config: ConfigBundle,
+        clickHouse: ClickHouseClientProtocol,
+        logger: Logger
+    ) async -> Bool {
+        do {
+            try await ClickHouseStartupManager(
+                config: config.clickHouse,
+                client: clickHouse,
+                logger: logger
+            ).ensureReady()
+            return true
+        } catch {
+            logger.warn("ClickHouse automatic recovery did not complete")
+            logger.verbose(OperationalFailureGuide.advice(for: error).formatted)
+            return false
         }
     }
 
@@ -470,6 +551,7 @@ struct MT5ResearchCLI {
           live
           supervise [--with-backfill] [--supervisor-cycles N]
           startcheck
+          failure-guide
           verify
           verify --random-ranges 20
           repair --symbol EURUSD --from 2020-01-01 --to 2020-02-01
@@ -495,6 +577,7 @@ enum Command: Equatable {
     case live
     case supervise
     case startcheck
+    case failureGuide
     case verify
     case repair
     case exportCache
@@ -506,7 +589,7 @@ enum Command: Equatable {
 private extension Command {
     var requiresClickHouseStartupCheck: Bool {
         switch self {
-        case .help, .symbolCheck:
+        case .help, .failureGuide, .symbolCheck:
             return false
         case .migrate, .bridgeCheck, .backfill, .live, .supervise, .startcheck, .verify, .repair, .exportCache, .backtest, .optimize:
             return true
@@ -738,6 +821,7 @@ struct CLIOptions {
         case "live": return .live
         case "supervise": return .supervise
         case "startcheck", "-startcheck", "--startcheck": return .startcheck
+        case "failure-guide": return .failureGuide
         case "verify": return .verify
         case "repair": return .repair
         case "export-cache": return .exportCache

@@ -138,6 +138,7 @@ public struct ProductionSupervisor: Sendable {
                         bridge = nil
                         bridgeUnavailableDetails = String(describing: error)
                     }
+                    await recoverClickHouseIfNeeded(after: error)
                     let outcome = AgentOutcomeFactory(kind: agent.descriptor.kind, startedAt: startedAt)
                         .failed("Agent failed", details: String(describing: error))
                     await recordAndLog(outcome)
@@ -168,6 +169,7 @@ public struct ProductionSupervisor: Sendable {
             try await eventStore.record(outcome, brokerSourceId: config.brokerTime.brokerSourceId)
         } catch {
             logger.warn("Could not write supervisor event for \(outcome.agent.rawValue): \(error)")
+            await recoverClickHouseIfNeeded(after: error)
         }
 
         let message = "\(outcome.agent.rawValue): \(outcome.message)"
@@ -191,6 +193,20 @@ public struct ProductionSupervisor: Sendable {
 
     private static func isBridgeRelated(_ error: Error) -> Bool {
         error is MT5BridgeError || error is ProtocolError || error is ProductionAgentError
+    }
+
+    private func recoverClickHouseIfNeeded(after error: Error) async {
+        guard error is ClickHouseError else { return }
+        do {
+            try await ClickHouseStartupManager(
+                config: config.clickHouse,
+                client: clickHouse,
+                logger: logger
+            ).ensureReady()
+        } catch {
+            logger.warn("ClickHouse automatic recovery failed inside supervisor")
+            logger.verbose(OperationalFailureGuide.advice(for: error).formatted)
+        }
     }
 
     private static func updatePersistentBlocks(

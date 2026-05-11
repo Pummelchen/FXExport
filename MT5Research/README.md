@@ -292,6 +292,7 @@ swift run mt5research supervise --with-backfill
 swift run mt5research supervise --supervisor-cycles 1
 swift run mt5research startcheck
 swift run mt5research -startcheck
+swift run mt5research failure-guide
 swift run mt5research verify
 swift run mt5research verify --random-ranges 20
 swift run mt5research repair --symbol EURUSD --from 2020-01-01 --to 2020-02-01
@@ -318,6 +319,8 @@ Global options:
 ```
 
 Use `--skip-bridge` only for the early preflight before the EA is attached. A production go-live run should use full `startcheck` without skips.
+
+`failure-guide` prints the built-in operational failure catalog. It covers ClickHouse outages and exceptions, MT5 bridge disconnects, protocol errors, unsynchronized MT5 history, missing or mismatched verified broker UTC offsets, bad OHLC data, canonical readback failures, duplicate canonical keys, interrupted first-run checkpoints, repair refusal, backtest readiness blocks, disk pressure, and crash/reboot recovery. Each scenario includes what the program does automatically, how data safety is preserved, and the exact human recovery steps when automation cannot safely continue.
 
 `symbol-check` returns a non-zero validation exit code if any configured symbol is missing, not selected, or has different digits than `Config/symbols.json`.
 
@@ -386,6 +389,8 @@ Implemented:
 - ClickHouse HTTP client and migrations.
 - Backfill/live update agents with MT5 history synchronization checks, conflict recording, checkpoint-after-canonical-readback flow, and canonical range replacement.
 - Production supervisor with ten operational agents, priority/supersedence rules, broker runtime lock, and runtime event/state tables.
+- Operational failure guide command with action-oriented recovery advice for unattended operation.
+- Resilient live updater that reconnects the MT5 bridge and retries local ClickHouse recovery with backoff without advancing checkpoints on failed batches.
 - Backtest/optimize readiness gate that blocks on incomplete first-run ingest, damaged canonical data, unresolved verification/repair state, or stale safety-agent OK state.
 - `startcheck` go-live gate with ClickHouse checks, MetaEditor EA compile, MT5 terminal identity validation, verified broker UTC offset coverage, and `GET_RATES_FROM_POSITION` smoke testing.
 - Startup verifier checks plus random historical MT5-vs-ClickHouse range comparison.

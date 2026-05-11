@@ -169,6 +169,27 @@ final class OperationsTests: XCTestCase {
         XCTAssertTrue(commands.isEmpty)
     }
 
+    func testOperationalFailureGuideCatalogCoversCoreDataSafetyFailures() {
+        let text = OperationalFailureGuide.catalogText()
+
+        XCTAssertTrue(text.contains("ClickHouse HTTP endpoint is down"))
+        XCTAssertTrue(text.contains("MT5 bridge disconnects during live run"))
+        XCTAssertTrue(text.contains("MetaEditor EA compile or toolchain failure"))
+        XCTAssertTrue(text.contains("Missing verified broker UTC offsets"))
+        XCTAssertTrue(text.contains("Canonical insert readback verification failed"))
+        XCTAssertTrue(text.contains("Backtest data readiness blocked"))
+        XCTAssertTrue(text.contains("Disk full or ClickHouse storage pressure"))
+        XCTAssertTrue(text.contains("Computer sleep, shutdown, or process interruption"))
+    }
+
+    func testOperationalFailureGuideMapsBacktestBlockToStopAdvice() {
+        let advice = OperationalFailureGuide.advice(for: BacktestReadinessError.duplicateCanonicalKeys(2))
+
+        XCTAssertEqual(advice.code, "BACKTEST-001")
+        XCTAssertEqual(advice.severity, RecoverySeverity.stop)
+        XCTAssertTrue(advice.dataSafety.contains("Research never runs"))
+    }
+
     func testAgentExecutionPolicySupersedesConflictingAgents() {
         let policy = AgentExecutionPolicy()
         let staticBlocked = policy.staticSupersedence(for: [.historyImporter, .liveM1Updater, .databaseVerifierRepairer, .backupReadiness])

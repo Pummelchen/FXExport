@@ -69,6 +69,12 @@ public struct LiveUpdateAgent: Sendable {
         for mapping in config.symbols.symbols {
             do {
                 try await update(mapping: mapping, validator: validator, insertBuilder: insertBuilder)
+            } catch let error as MT5BridgeError {
+                throw error
+            } catch let error as ProtocolError {
+                throw error
+            } catch let error as ClickHouseError {
+                throw error
             } catch {
                 failureCount += 1
                 logger.warn("\(mapping.logicalSymbol.rawValue): live update skipped safely: \(error)")
