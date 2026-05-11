@@ -52,10 +52,10 @@ public struct ClickHouseCheckpointStore: CheckpointStore {
         SELECT broker_source_id, logical_symbol, mt5_symbol, oldest_mt5_server_ts_raw,
                latest_ingested_closed_mt5_server_ts_raw, latest_ingested_closed_ts_utc,
                status, last_batch_id, updated_at_utc
-        FROM \(database).ingest_state FINAL
+        FROM \(database).ingest_state
         WHERE broker_source_id = '\(Self.sqlLiteral(brokerSourceId.rawValue))'
           AND logical_symbol = '\(Self.sqlLiteral(logicalSymbol.rawValue))'
-        ORDER BY updated_at_utc DESC
+        ORDER BY latest_ingested_closed_mt5_server_ts_raw DESC, updated_at_utc DESC
         LIMIT 1
         FORMAT TabSeparated
         """

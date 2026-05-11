@@ -56,6 +56,55 @@ The executable is:
 .build/release/mt5research
 ```
 
+## First Run Quickstart
+
+1. Start ClickHouse and confirm the HTTP endpoint is reachable.
+2. Build the release binary:
+
+```bash
+swift build -c release
+```
+
+3. Copy and edit the local configs in `Config/`. Keep the ClickHouse password only in `Config/clickhouse.json`; this directory is ignored by Git.
+4. Run migrations:
+
+```bash
+.build/release/mt5research migrate --config-dir Config --migrations-dir Migrations
+```
+
+5. Insert active, verified broker UTC offset rows into `broker_time_offsets` for the exact MT5 company/server/account you will use.
+6. Start the Swift listener:
+
+```bash
+.build/release/mt5research bridge-check --config-dir Config
+```
+
+7. Attach `HistoryBridgeEA.mq5` in MT5 and confirm `bridge-check` succeeds.
+8. Confirm symbol mappings and broker digits:
+
+```bash
+.build/release/mt5research symbol-check --config-dir Config
+```
+
+9. Run the initial historical backfill:
+
+```bash
+.build/release/mt5research backfill --config-dir Config --symbols all
+```
+
+10. Run verification without random MT5 ranges first, then with MT5 random ranges when the bridge is connected:
+
+```bash
+.build/release/mt5research verify --config-dir Config --random-ranges 0
+.build/release/mt5research verify --config-dir Config --random-ranges 20
+```
+
+11. Start live updates only after backfill is complete or intentionally resumed:
+
+```bash
+.build/release/mt5research live --config-dir Config
+```
+
 ## Configuration
 
 Copy the sample configs:
@@ -158,6 +207,28 @@ This creates:
 Raw audit data is append-only. Repairs only target canonical data and must preserve conflicts and repair logs.
 
 Canonical ingestion is replace-by-range for the affected broker/source/symbol range. The delete predicate covers both the raw MT5 server-time range and the converted UTC identity range before reinserting verified rows. After the replacement insert, Swift reads the canonical range back from ClickHouse and verifies row count plus unique MT5 and UTC timestamp counts before advancing the checkpoint. This prevents duplicate canonical bars after a crash between insert and checkpoint update, and also catches older rows written under a wrong UTC mapping. Raw audit rows remain append-only.
+
+## Crash Or Abort Recovery
+
+If the first backfill is interrupted by a crash, reboot, terminal close, MT5 disconnect, or ClickHouse outage, do not drop tables and do not manually edit `ingest_state`.
+
+Safe recovery sequence:
+
+```bash
+.build/release/mt5research migrate --config-dir Config --migrations-dir Migrations
+.build/release/mt5research verify --config-dir Config --random-ranges 0
+.build/release/mt5research backfill --config-dir Config --symbols all
+.build/release/mt5research verify --config-dir Config --random-ranges 20
+.build/release/mt5research live --config-dir Config
+```
+
+Backfill is designed to be rerun. A checkpoint is advanced only after raw insert, canonical range replacement, canonical insert, and canonical readback verification all succeed. If the process crashes before that point, rerunning backfill starts again from the last verified checkpoint. Canonical rows for the retried range are deleted and reinserted by both MT5 server-time range and UTC identity range, so duplicate canonical bars should not accumulate.
+
+If MT5 exposes older historical bars after the first partial run, backfill now detects that the newly discovered oldest MT5 bar is earlier than the stored checkpoint oldest and reprocesses from the new oldest bar. This is conservative but prevents silent holes at the beginning of history.
+
+If the checkpoint references a different configured MT5 symbol, or the checkpoint is newer than MT5's latest closed bar, ingestion stops for that symbol. Treat that as a broker/source identity problem and inspect config, MT5 account/server, and `broker_time_offsets` before continuing.
+
+Raw audit rows are append-only. A crash/retry may leave repeated raw audit attempts with the same deterministic `batch_id`, but canonical backtesting data is rewritten and verified before the checkpoint moves.
 
 ## MT5 EA Setup
 

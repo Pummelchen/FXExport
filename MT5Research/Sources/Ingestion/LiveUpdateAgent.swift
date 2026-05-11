@@ -89,7 +89,21 @@ public struct LiveUpdateAgent: Sendable {
             logger.warn("\(mapping.logicalSymbol.rawValue): no checkpoint exists; run backfill first")
             return
         }
+        guard state.mt5Symbol == mapping.mt5Symbol else {
+            throw IngestError.checkpointSymbolMismatch(
+                logicalSymbol: mapping.logicalSymbol.rawValue,
+                expected: mapping.mt5Symbol.rawValue,
+                actual: state.mt5Symbol.rawValue
+            )
+        }
 
+        guard latestClosed.rawValue >= state.latestIngestedClosedMT5ServerTime.rawValue else {
+            throw IngestError.checkpointAheadOfMT5(
+                logicalSymbol: mapping.logicalSymbol.rawValue,
+                checkpoint: state.latestIngestedClosedMT5ServerTime.rawValue,
+                latestClosed: latestClosed.rawValue
+            )
+        }
         guard latestClosed.rawValue > state.latestIngestedClosedMT5ServerTime.rawValue else { return }
 
         let from = MT5ServerSecond(rawValue: state.latestIngestedClosedMT5ServerTime.rawValue + Timeframe.m1.seconds)

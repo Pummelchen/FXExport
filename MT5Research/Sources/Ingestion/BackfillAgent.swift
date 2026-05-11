@@ -16,6 +16,8 @@ public enum IngestError: Error, CustomStringConvertible, Sendable {
     case invalidBridgeResponse(String)
     case canonicalInsertVerificationFailed(String)
     case terminalIdentityMismatch(String)
+    case checkpointSymbolMismatch(logicalSymbol: String, expected: String, actual: String)
+    case checkpointAheadOfMT5(logicalSymbol: String, checkpoint: Int64, latestClosed: Int64)
 
     public var description: String {
         switch self {
@@ -35,6 +37,10 @@ public enum IngestError: Error, CustomStringConvertible, Sendable {
             return "Canonical insert verification failed: \(reason)"
         case .terminalIdentityMismatch(let reason):
             return "MT5 terminal identity mismatch: \(reason)"
+        case .checkpointSymbolMismatch(let logicalSymbol, let expected, let actual):
+            return "\(logicalSymbol) checkpoint MT5 symbol mismatch. Config expects '\(expected)', checkpoint contains '\(actual)'. Stop and inspect symbol mapping before resuming."
+        case .checkpointAheadOfMT5(let logicalSymbol, let checkpoint, let latestClosed):
+            return "\(logicalSymbol) checkpoint \(checkpoint) is newer than MT5 latest closed bar \(latestClosed). Stop and inspect broker/source identity before resuming."
         }
     }
 }
@@ -128,9 +134,15 @@ public struct BackfillAgent: Sendable {
             brokerSourceId: config.brokerTime.brokerSourceId,
             logicalSymbol: mapping.logicalSymbol
         )
-        var cursor = existingState.map {
-            MT5ServerSecond(rawValue: $0.latestIngestedClosedMT5ServerTime.rawValue + Timeframe.m1.seconds)
-        } ?? oldest
+        let resumeDecision = try BackfillResumePolicy.decide(
+            logicalSymbol: mapping.logicalSymbol,
+            mt5Symbol: mapping.mt5Symbol,
+            oldest: oldest,
+            latestClosed: latestClosed,
+            existingState: existingState
+        )
+        logResumeDecision(resumeDecision, logicalSymbol: mapping.logicalSymbol)
+        var cursor = resumeDecision.cursor
 
         while cursor.rawValue <= latestClosed.rawValue {
             let range = batchBuilder.nextRange(start: cursor, endInclusive: latestClosed)
@@ -215,6 +227,19 @@ public struct BackfillAgent: Sendable {
         }
         guard response.timeframe == Timeframe.m1.rawValue else {
             throw IngestError.invalidBridgeResponse("expected M1 rates, got \(response.timeframe)")
+        }
+    }
+
+    private func logResumeDecision(_ decision: BackfillResumeDecision, logicalSymbol: LogicalSymbol) {
+        switch decision.action {
+        case .freshBackfill:
+            logger.info("\(logicalSymbol.rawValue): no checkpoint found; starting from MT5 oldest available bar")
+        case .resumeFromCheckpoint:
+            logger.info("\(logicalSymbol.rawValue): resuming from checkpoint at \(decision.cursor.rawValue) server time")
+        case .reprocessExpandedOlderHistory:
+            logger.warn("\(logicalSymbol.rawValue): MT5 history now starts earlier than the stored checkpoint oldest; reprocessing from \(decision.cursor.rawValue) to keep canonical history complete")
+        case .resumeAfterPrunedHistory:
+            logger.warn("\(logicalSymbol.rawValue): MT5 no longer exposes the checkpoint's next server-time range; resuming at current MT5 oldest \(decision.cursor.rawValue)")
         }
     }
 

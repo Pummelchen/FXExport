@@ -29,6 +29,51 @@ final class IngestionTests: XCTestCase {
         XCTAssertEqual(loaded, state)
     }
 
+    func testClickHouseCheckpointReadUsesHighestIngestedServerTime() async throws {
+        let client = MockClickHouseClient(body: """
+        demo\tEURUSD\tEURUSD\t60\t180\t120\tbackfilling\tb\t1
+
+        """)
+        let store = ClickHouseCheckpointStore(
+            client: client,
+            insertBuilder: ClickHouseInsertBuilder(database: "db"),
+            database: "db"
+        )
+        _ = try await store.latestState(brokerSourceId: try BrokerSourceId("demo"), logicalSymbol: try LogicalSymbol("EURUSD"))
+        let query = await client.lastQuery()
+        XCTAssertFalse(query.contains("FINAL"))
+        XCTAssertTrue(query.contains("ORDER BY latest_ingested_closed_mt5_server_ts_raw DESC, updated_at_utc DESC"))
+    }
+
+    func testBackfillResumeReprocessesWhenMT5HistoryExpandsOlder() throws {
+        let state = try ingestState(oldest: 1_000, latest: 2_000)
+        let decision = try BackfillResumePolicy.decide(
+            logicalSymbol: state.logicalSymbol,
+            mt5Symbol: state.mt5Symbol,
+            oldest: MT5ServerSecond(rawValue: 500),
+            latestClosed: MT5ServerSecond(rawValue: 3_000),
+            existingState: state
+        )
+        XCTAssertEqual(decision.cursor, MT5ServerSecond(rawValue: 500))
+        XCTAssertEqual(decision.action, .reprocessExpandedOlderHistory)
+    }
+
+    func testBackfillResumeRejectsCheckpointAheadOfMT5() throws {
+        let state = try ingestState(oldest: 1_000, latest: 4_000)
+        XCTAssertThrowsError(try BackfillResumePolicy.decide(
+            logicalSymbol: state.logicalSymbol,
+            mt5Symbol: state.mt5Symbol,
+            oldest: MT5ServerSecond(rawValue: 1_000),
+            latestClosed: MT5ServerSecond(rawValue: 3_000),
+            existingState: state
+        )) { error in
+            guard case IngestError.checkpointAheadOfMT5 = error else {
+                XCTFail("Expected checkpointAheadOfMT5, got \(error)")
+                return
+            }
+        }
+    }
+
     func testBrokerOffsetStoreLoadsVerifiedIdentityBoundRows() async throws {
         let client = MockClickHouseClient(body: """
         demo\tBroker Ltd\tBroker-Server\t12345\t0\t3600\t7200\tmanual\tverified\t1700000000
@@ -60,6 +105,20 @@ final class IngestionTests: XCTestCase {
         await XCTAssertThrowsErrorAsync(try await ClickHouseBrokerOffsetStore(client: client, database: "db")
             .loadVerifiedOffsetMap(brokerSourceId: broker, terminalIdentity: identity))
     }
+}
+
+private func ingestState(oldest: Int64, latest: Int64) throws -> IngestState {
+    IngestState(
+        brokerSourceId: try BrokerSourceId("demo"),
+        logicalSymbol: try LogicalSymbol("EURUSD"),
+        mt5Symbol: try MT5Symbol("EURUSD"),
+        oldestMT5ServerTime: MT5ServerSecond(rawValue: oldest),
+        latestIngestedClosedMT5ServerTime: MT5ServerSecond(rawValue: latest),
+        latestIngestedClosedUtcTime: UtcSecond(rawValue: latest - 60),
+        status: .backfilling,
+        lastBatchId: BatchId(rawValue: "b"),
+        updatedAtUtc: UtcSecond(rawValue: 1)
+    )
 }
 
 private actor MockClickHouseClient: ClickHouseClientProtocol {
