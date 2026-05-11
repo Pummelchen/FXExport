@@ -30,6 +30,13 @@ struct MT5ResearchCLI {
             let config = try loader.loadBundle(configDirectory: options.configDirectory)
             let logger = Logger(level: options.overrideLogLevel ?? config.app.logLevel)
             let clickHouse = ClickHouseHTTPClient(config: config.clickHouse, logger: logger)
+            if options.command.requiresClickHouseStartupCheck {
+                try await ClickHouseStartupManager(
+                    config: config.clickHouse,
+                    client: clickHouse,
+                    logger: logger
+                ).ensureReady()
+            }
 
             switch options.command {
             case .migrate:
@@ -240,6 +247,10 @@ struct MT5ResearchCLI {
         } catch let error as BrokerOffsetRuntimeError {
             print("[ERROR] Broker UTC offset: \(error.description)")
             return .configuration
+        } catch let error as ClickHouseStartupError {
+            print("[ERROR] ClickHouse startup check failed")
+            print(error.description)
+            return .clickHouse
         } catch let error as SupervisorError {
             print("[ERROR] Runtime lock: \(error.description)")
             return .configuration
@@ -252,11 +263,34 @@ struct MT5ResearchCLI {
         } catch let error as VerificationError {
             print("[ERROR] Verification: \(error.description)")
             return .verification
+        } catch let error as MT5BridgeStartupError {
+            print("[ERROR] MT5 bridge startup check failed")
+            print(error.description)
+            return .mt5Bridge
+        } catch let error as ProtocolError {
+            print("[ERROR] MT5 bridge protocol check failed")
+            print("""
+            Reason: \(error.description)
+            Next steps:
+              1. Recompile the EA: mt5research startcheck --config-dir Config --migrations-dir Migrations --skip-bridge
+              2. Reattach HistoryBridgeEA in MT5.
+              3. Rerun: mt5research startcheck --config-dir Config --migrations-dir Migrations
+            """)
+            return .mt5Bridge
         } catch let error as MT5BridgeError {
-            print("[ERROR] MT5 bridge: \(error.description)")
+            print("[ERROR] MT5 bridge is not ready")
+            print("Reason: \(error.description)")
+            print("Next step: run `mt5research startcheck --config-dir Config --migrations-dir Migrations` for guided MT5/EA checks.")
             return .mt5Bridge
         } catch let error as ClickHouseError {
-            print("[ERROR] ClickHouse: \(error.description)")
+            print("[ERROR] ClickHouse operation failed")
+            print("""
+            Reason: \(error.description)
+            Next steps:
+              1. Run: mt5research startcheck --config-dir Config --migrations-dir Migrations
+              2. If ClickHouse is stopped, the startup check will try to start it automatically.
+              3. If authentication fails, fix Config/clickhouse.json and keep the password only in that local ignored file.
+            """)
             return .clickHouse
         } catch {
             print("[ERROR] \(error)")
@@ -265,23 +299,27 @@ struct MT5ResearchCLI {
     }
 
     private static func connectBridge(config: ConfigBundle, logger: Logger) throws -> MT5BridgeClient {
-        switch config.mt5Bridge.mode {
-        case .listen:
-            logger.db("Waiting for MT5 EA bridge at \(config.mt5Bridge.host):\(config.mt5Bridge.port)")
-            return try MT5BridgeClient.listen(
-                host: config.mt5Bridge.host,
-                port: config.mt5Bridge.port,
-                connectTimeoutSeconds: config.mt5Bridge.connectTimeoutSeconds,
-                requestTimeoutSeconds: config.mt5Bridge.requestTimeoutSeconds
-            )
-        case .connect:
-            logger.db("Connecting to MT5 bridge at \(config.mt5Bridge.host):\(config.mt5Bridge.port)")
-            return try MT5BridgeClient.connect(
-                host: config.mt5Bridge.host,
-                port: config.mt5Bridge.port,
-                connectTimeoutSeconds: config.mt5Bridge.connectTimeoutSeconds,
-                requestTimeoutSeconds: config.mt5Bridge.requestTimeoutSeconds
-            )
+        do {
+            switch config.mt5Bridge.mode {
+            case .listen:
+                logger.db("Waiting for MT5 EA bridge at \(config.mt5Bridge.host):\(config.mt5Bridge.port)")
+                return try MT5BridgeClient.listen(
+                    host: config.mt5Bridge.host,
+                    port: config.mt5Bridge.port,
+                    connectTimeoutSeconds: config.mt5Bridge.connectTimeoutSeconds,
+                    requestTimeoutSeconds: config.mt5Bridge.requestTimeoutSeconds
+                )
+            case .connect:
+                logger.db("Connecting to MT5 bridge at \(config.mt5Bridge.host):\(config.mt5Bridge.port)")
+                return try MT5BridgeClient.connect(
+                    host: config.mt5Bridge.host,
+                    port: config.mt5Bridge.port,
+                    connectTimeoutSeconds: config.mt5Bridge.connectTimeoutSeconds,
+                    requestTimeoutSeconds: config.mt5Bridge.requestTimeoutSeconds
+                )
+            }
+        } catch let error as MT5BridgeError {
+            throw MT5BridgeStartupError(error: error, config: config.mt5Bridge)
         }
     }
 
@@ -463,6 +501,82 @@ enum Command: Equatable {
     case backtest
     case optimize
     case help
+}
+
+private extension Command {
+    var requiresClickHouseStartupCheck: Bool {
+        switch self {
+        case .help, .symbolCheck:
+            return false
+        case .migrate, .bridgeCheck, .backfill, .live, .supervise, .startcheck, .verify, .repair, .exportCache, .backtest, .optimize:
+            return true
+        }
+    }
+}
+
+private struct MT5BridgeStartupError: Error, CustomStringConvertible {
+    let error: MT5BridgeError
+    let config: MT5BridgeConfig
+
+    var description: String {
+        switch error {
+        case .bindFailed:
+            return """
+            Swift could not open the MT5 bridge listener on \(config.host):\(config.port).
+            Reason: \(error.description)
+            Next steps:
+              1. Check what owns the port: lsof -nP -iTCP:\(config.port) -sTCP:LISTEN
+              2. Stop the other mt5research process, or change Config/mt5_bridge.json to another free port.
+              3. Reattach HistoryBridgeEA with the same SwiftHost/SwiftPort values.
+              4. Rerun: mt5research startcheck --config-dir Config --migrations-dir Migrations
+            """
+        case .acceptTimedOut:
+            return listenModeGuidance(reason: error.description)
+        case .connectFailed:
+            return connectModeGuidance(reason: error.description)
+        case .invalidHost:
+            return """
+            The MT5 bridge host in Config/mt5_bridge.json is invalid.
+            Reason: \(error.description)
+            Next steps:
+              1. For local MT5/Wine, set host to 127.0.0.1.
+              2. Keep the EA input SwiftHost exactly the same.
+              3. Rerun: mt5research startcheck --config-dir Config --migrations-dir Migrations
+            """
+        default:
+            switch config.mode {
+            case .listen:
+                return listenModeGuidance(reason: error.description)
+            case .connect:
+                return connectModeGuidance(reason: error.description)
+            }
+        }
+    }
+
+    private func listenModeGuidance(reason: String) -> String {
+        """
+        MT5 did not connect to the Swift listener at \(config.host):\(config.port).
+        Reason: \(reason)
+        Next steps:
+          1. Start MetaTrader 5 under Wine.
+          2. Attach the compiled HistoryBridgeEA to any chart.
+          3. In the EA inputs set SwiftHost=\(config.host) and SwiftPort=\(config.port).
+          4. Enable Algo Trading and allow localhost/socket access in MT5/Wine when prompted.
+          5. Leave this Swift command running while the EA connects, or rerun: mt5research startcheck --config-dir Config --migrations-dir Migrations
+        """
+    }
+
+    private func connectModeGuidance(reason: String) -> String {
+        """
+        Swift could not connect to the MT5 bridge at \(config.host):\(config.port).
+        Reason: \(reason)
+        Next steps:
+          1. Confirm the MT5 EA bridge is already listening on \(config.host):\(config.port), or switch Config/mt5_bridge.json mode to "listen".
+          2. Check the port: lsof -nP -iTCP:\(config.port)
+          3. Confirm macOS/Wine firewall prompts are allowed.
+          4. Rerun: mt5research startcheck --config-dir Config --migrations-dir Migrations
+        """
+    }
 }
 
 struct CLIOptions {

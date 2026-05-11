@@ -58,7 +58,15 @@ The executable is:
 
 ## First Run Quickstart
 
-1. Start ClickHouse and confirm the HTTP endpoint is reachable.
+1. Start the tool and let the startup preflight check ClickHouse. If `Config/clickhouse.json` points to local ClickHouse at `localhost` or `127.0.0.1` and the HTTP endpoint is down, the tool tries safe local start commands automatically:
+
+```bash
+brew services start clickhouse
+brew services start clickhouse-server
+clickhouse start
+```
+
+If those attempts fail, the terminal prints the exact next checks to run. Remote ClickHouse URLs are never auto-started.
 2. Build the release binary:
 
 ```bash
@@ -269,6 +277,8 @@ Attach it to a chart and enable socket/network permissions required by your MT5/
 Then start a Swift command that listens for the EA.
 
 ## CLI Commands
+
+At startup, commands that require ClickHouse first run a local readiness check. If local ClickHouse is stopped, the program tries to start it and waits for the HTTP endpoint before continuing. Commands that require MT5 print action-oriented bridge setup guidance when the EA/socket is not ready instead of leaving the user with only a low-level socket error.
 
 ```bash
 swift run mt5research migrate

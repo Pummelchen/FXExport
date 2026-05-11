@@ -1,3 +1,4 @@
+import AppCore
 import ClickHouse
 import Config
 import Domain
@@ -105,6 +106,67 @@ final class OperationsTests: XCTestCase {
         let importer = try XCTUnwrap(agents.first { $0.descriptor.kind == .historyImporter })
 
         XCTAssertEqual(importer.descriptor.intervalSeconds, config.app.supervisor.checkpointAuditIntervalSeconds)
+    }
+
+    func testClickHouseStartupManagerRunsStartCommandForLocalTransportFailure() async throws {
+        let config = try makeConfig()
+        let client = StartupClickHouse(failuresBeforeSuccess: 1)
+        let command = SystemCommandRequest(
+            executable: URL(fileURLWithPath: "/bin/echo"),
+            arguments: ["start-clickhouse"],
+            timeoutSeconds: 1
+        )
+        let runner = RecordingCommandRunner(resultExitCode: 0)
+        let manager = ClickHouseStartupManager(
+            config: config.clickHouse,
+            client: client,
+            logger: Logger(level: .quiet),
+            commandRunner: runner,
+            startCommands: [command],
+            startupWaitSeconds: 0.1,
+            pollIntervalNanoseconds: 1_000_000
+        )
+
+        try await manager.ensureReady()
+
+        let commands = await runner.executedCommands()
+        XCTAssertEqual(commands, ["/bin/echo start-clickhouse"])
+    }
+
+    func testClickHouseStartupManagerDoesNotStartRemoteEndpoint() async throws {
+        var config = try makeConfig()
+        config = ConfigBundle(
+            app: config.app,
+            clickHouse: ClickHouseConfig(
+                url: try XCTUnwrap(URL(string: "http://db.example.com:8123")),
+                database: config.clickHouse.database,
+                username: nil,
+                password: nil,
+                requestTimeoutSeconds: 1,
+                retryCount: 0
+            ),
+            mt5Bridge: config.mt5Bridge,
+            brokerTime: config.brokerTime,
+            symbols: config.symbols
+        )
+        let client = StartupClickHouse(failuresBeforeSuccess: Int.max)
+        let runner = RecordingCommandRunner(resultExitCode: 0)
+        let manager = ClickHouseStartupManager(
+            config: config.clickHouse,
+            client: client,
+            logger: Logger(level: .quiet),
+            commandRunner: runner,
+            startCommands: [SystemCommandRequest(executable: URL(fileURLWithPath: "/bin/echo"), arguments: ["start"], timeoutSeconds: 1)]
+        )
+
+        await XCTAssertThrowsErrorAsync(try await manager.ensureReady()) { error in
+            guard case ClickHouseStartupError.notAutoStartable = error else {
+                XCTFail("Expected notAutoStartable, got \(error)")
+                return
+            }
+        }
+        let commands = await runner.executedCommands()
+        XCTAssertTrue(commands.isEmpty)
     }
 
     func testAgentExecutionPolicySupersedesConflictingAgents() {
@@ -365,6 +427,45 @@ private actor BacktestGateClickHouse: ClickHouseClientProtocol {
             return "10\n"
         }
         return "0\n"
+    }
+}
+
+private actor StartupClickHouse: ClickHouseClientProtocol {
+    private var failuresBeforeSuccess: Int
+
+    init(failuresBeforeSuccess: Int) {
+        self.failuresBeforeSuccess = failuresBeforeSuccess
+    }
+
+    func execute(_ query: ClickHouseQuery) async throws -> String {
+        if failuresBeforeSuccess > 0 {
+            failuresBeforeSuccess -= 1
+            throw ClickHouseError.transport("connection refused")
+        }
+        return "1\n"
+    }
+}
+
+private actor RecordingCommandRunner: SystemCommandRunning {
+    private var commands: [String] = []
+    private let resultExitCode: Int32
+
+    init(resultExitCode: Int32) {
+        self.resultExitCode = resultExitCode
+    }
+
+    func run(_ request: SystemCommandRequest) async throws -> SystemCommandResult {
+        commands.append(request.display)
+        return SystemCommandResult(
+            request: request,
+            exitCode: resultExitCode,
+            stdout: "",
+            stderr: ""
+        )
+    }
+
+    func executedCommands() -> [String] {
+        commands
     }
 }
 
