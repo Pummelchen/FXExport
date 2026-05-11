@@ -89,6 +89,24 @@ public final class MT5BridgeClient: @unchecked Sendable {
         )
     }
 
+    public func ratesFromPosition(mt5Symbol: MT5Symbol, startPosition: Int, count: Int) throws -> RatesResponseDTO {
+        guard startPosition >= 1 else {
+            throw ProtocolError.invalidField("start_pos")
+        }
+        guard count > 0 else {
+            throw ProtocolError.invalidField("count")
+        }
+        return try request(
+            command: .getRatesFromPosition,
+            payload: RatesFromPositionPayload(
+                mt5Symbol: mt5Symbol.rawValue,
+                startPosition: startPosition,
+                count: count
+            ),
+            responseType: RatesResponseDTO.self
+        )
+    }
+
     public func serverTimeSnapshot() throws -> ServerTimeSnapshotDTO {
         try request(command: .getServerTimeSnapshot, payload: EmptyPayload(), responseType: ServerTimeSnapshotDTO.self)
     }

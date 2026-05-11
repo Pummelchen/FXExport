@@ -66,40 +66,41 @@ swift build -c release
 ```
 
 3. Copy and edit the local configs in `Config/`. Keep the ClickHouse password only in `Config/clickhouse.json`; this directory is ignored by Git.
-4. Run migrations:
+4. Run the database and EA preflight. This applies idempotent migrations, verifies required tables, runs DB-only integrity checks, and compiles `HistoryBridgeEA.mq5` through MetaEditor from the terminal:
 
 ```bash
-.build/release/mt5research migrate --config-dir Config --migrations-dir Migrations
+.build/release/mt5research startcheck --config-dir Config --migrations-dir Migrations --skip-bridge
 ```
 
-5. Start the Swift listener. `bridge-check` waits for the EA, prints the terminal identity, and automatically verifies the live broker server UTC offset from the EA snapshot against the audited ClickHouse offset authority:
+5. Attach the compiled `HistoryBridgeEA` in MT5. Set `SwiftHost = 127.0.0.1` and `SwiftPort = 5055`, then allow localhost sockets in MT5/Wine if prompted.
+6. Run the full go-live gate. This repeats the DB and EA compile checks, waits for the EA socket, verifies the connected MT5 terminal identity, checks the live server offset through the EA, proves verified offset coverage for the configured MT5 history, and tests `GET_RATES_FROM_POSITION` with `start_pos=1` so the open M1 bar is excluded:
 
 ```bash
-.build/release/mt5research bridge-check --config-dir Config
+.build/release/mt5research startcheck --config-dir Config --migrations-dir Migrations
 ```
 
-6. Attach `HistoryBridgeEA.mq5` in MT5 if it is not already running, then confirm `bridge-check` succeeds.
-7. If `bridge-check` reports missing `broker_time_offsets`, insert active, verified historical offset authority for the exact MT5 company/server/account shown by the EA. Do not calculate the current live offset by hand; `bridge-check`, `backfill`, `live`, and MT5-backed `verify` check the live offset automatically through the EA.
-8. Confirm symbol mappings and broker digits:
+If `startcheck` stops at the bridge step, follow the terminal message: start MT5, attach the compiled EA, verify the host/port, then rerun the same command. If it reports missing `broker_time_offsets`, insert active, verified historical offset authority for the exact MT5 company/server/account shown by the EA. Do not calculate the current live offset by hand; `startcheck`, `bridge-check`, `backfill`, `live`, and MT5-backed `verify` check the live offset automatically through the EA.
+
+7. Confirm symbol mappings and broker digits:
 
 ```bash
 .build/release/mt5research symbol-check --config-dir Config
 ```
 
-9. Run the initial historical backfill:
+8. Run the initial historical backfill:
 
 ```bash
 .build/release/mt5research backfill --config-dir Config --symbols all
 ```
 
-10. Run verification without random MT5 ranges first, then with MT5 random ranges when the bridge is connected:
+9. Run verification without random MT5 ranges first, then with MT5 random ranges when the bridge is connected:
 
 ```bash
 .build/release/mt5research verify --config-dir Config --random-ranges 0
 .build/release/mt5research verify --config-dir Config --random-ranges 20
 ```
 
-11. Start live updates only after backfill is complete or intentionally resumed:
+10. Start live updates only after backfill is complete or intentionally resumed:
 
 ```bash
 .build/release/mt5research live --config-dir Config
@@ -248,7 +249,13 @@ Raw audit rows are append-only. A crash/retry may leave repeated raw audit attem
 
 ## MT5 EA Setup
 
-Copy `EA/HistoryBridgeEA.mq5` into your MT5 `MQL5/Experts` folder and compile it in MetaEditor.
+Keep `EA/HistoryBridgeEA.mq5` under the MT5 `MQL5/Experts` tree and let `startcheck` compile it through MetaEditor:
+
+```bash
+.build/release/mt5research startcheck --config-dir Config --migrations-dir Migrations --skip-bridge
+```
+
+If your package is outside the MT5 Experts tree, copy `EA/HistoryBridgeEA.mq5` into `MQL5/Experts` first or set `MT5RESEARCH_METAEDITOR`, `MT5RESEARCH_WINE`, and `MT5RESEARCH_WINEPREFIX` so the terminal compile check can find the MT5 toolchain.
 
 Attach it to a chart and enable socket/network permissions required by your MT5/Wine setup. Configure:
 
@@ -269,6 +276,8 @@ swift run mt5research live
 swift run mt5research supervise
 swift run mt5research supervise --with-backfill
 swift run mt5research supervise --supervisor-cycles 1
+swift run mt5research startcheck
+swift run mt5research -startcheck
 swift run mt5research verify
 swift run mt5research verify --random-ranges 20
 swift run mt5research repair --symbol EURUSD --from 2020-01-01 --to 2020-02-01
@@ -285,6 +294,16 @@ Global options:
 --verbose
 --debug
 ```
+
+`startcheck` options:
+
+```bash
+--skip-ea-compile
+--skip-bridge
+--compile-timeout-seconds 180
+```
+
+Use `--skip-bridge` only for the early preflight before the EA is attached. A production go-live run should use full `startcheck` without skips.
 
 `repair --from` and `--to` are UTC dates in `YYYY-MM-DD` format. Repair first verifies the requested range against MT5, repairs canonical rows only when the mismatch is unambiguous and UTC mapping is verified, writes `repair_log`, and then verifies the range again. Raw audit rows are never deleted.
 
@@ -322,6 +341,7 @@ Implemented:
 - ClickHouse HTTP client and migrations.
 - Backfill/live update agents with checkpoint-after-canonical-readback flow and canonical range replacement.
 - Production supervisor with ten operational agents and runtime event/state tables.
+- `startcheck` go-live gate with ClickHouse checks, MetaEditor EA compile, MT5 terminal identity validation, verified broker UTC offset coverage, and `GET_RATES_FROM_POSITION` smoke testing.
 - Startup verifier checks plus random historical MT5-vs-ClickHouse range comparison.
 - Canonical-only repair command with verify -> repair -> reverify flow.
 - CPU backtest scaffold using columnar arrays.

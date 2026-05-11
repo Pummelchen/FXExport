@@ -134,6 +134,24 @@ struct MT5ResearchCLI {
                 _ = lock
                 return .success
 
+            case .startcheck:
+                let runner = StartCheckRunner(
+                    config: config,
+                    clickHouse: clickHouse,
+                    logger: logger,
+                    bridgeConnector: {
+                        try connectBridge(config: config, logger: logger)
+                    },
+                    options: StartCheckOptions(
+                        migrationsDirectory: options.migrationsDirectory,
+                        workingDirectory: URL(fileURLWithPath: FileManager.default.currentDirectoryPath),
+                        compileEA: options.compileEA,
+                        bridgeChecks: options.bridgeChecks,
+                        compileTimeoutSeconds: options.compileTimeoutSeconds
+                    )
+                )
+                return await runner.run() ? .success : .verification
+
             case .verify:
                 let bridge: MT5BridgeClient?
                 if options.requiresBridge {
@@ -352,6 +370,7 @@ struct MT5ResearchCLI {
           backfill --symbols EURUSD,USDJPY
           live
           supervise [--with-backfill] [--supervisor-cycles N]
+          startcheck
           verify
           verify --random-ranges 20
           repair --symbol EURUSD --from 2020-01-01 --to 2020-02-01
@@ -375,6 +394,7 @@ enum Command: Equatable {
     case backfill
     case live
     case supervise
+    case startcheck
     case verify
     case repair
     case exportCache
@@ -396,6 +416,9 @@ struct CLIOptions {
     let requiresBridge: Bool
     let runBackfillOnStart: Bool?
     let supervisorCycles: Int?
+    let compileEA: Bool
+    let bridgeChecks: Bool
+    let compileTimeoutSeconds: TimeInterval
 
     init(arguments: [String]) throws {
         guard let first = arguments.first else {
@@ -411,6 +434,9 @@ struct CLIOptions {
             self.requiresBridge = false
             self.runBackfillOnStart = nil
             self.supervisorCycles = nil
+            self.compileEA = true
+            self.bridgeChecks = true
+            self.compileTimeoutSeconds = 120
             return
         }
 
@@ -427,6 +453,9 @@ struct CLIOptions {
         var noBridgeRequested = false
         var runBackfillOnStart: Bool?
         var supervisorCycles: Int?
+        var compileEA = true
+        var bridgeChecks = true
+        var compileTimeoutSeconds: TimeInterval = 120
 
         var index = 1
         while index < arguments.count {
@@ -474,6 +503,16 @@ struct CLIOptions {
                     throw CLIError.invalidValue(arg)
                 }
                 supervisorCycles = value
+            case "--skip-ea-compile":
+                compileEA = false
+            case "--skip-bridge":
+                bridgeChecks = false
+            case "--compile-timeout-seconds":
+                index += 1
+                guard index < arguments.count, let value = TimeInterval(arguments[index]), value > 0, value <= 1800 else {
+                    throw CLIError.invalidValue(arg)
+                }
+                compileTimeoutSeconds = value
             case "--verbose":
                 overrideLogLevel = .verbose
             case "--debug":
@@ -505,6 +544,9 @@ struct CLIOptions {
         self.requiresBridge = requiresBridge
         self.runBackfillOnStart = runBackfillOnStart
         self.supervisorCycles = supervisorCycles
+        self.compileEA = compileEA
+        self.bridgeChecks = bridgeChecks
+        self.compileTimeoutSeconds = compileTimeoutSeconds
     }
 
     private static func parseCommand(_ value: String) throws -> Command {
@@ -515,6 +557,7 @@ struct CLIOptions {
         case "backfill": return .backfill
         case "live": return .live
         case "supervise": return .supervise
+        case "startcheck", "-startcheck", "--startcheck": return .startcheck
         case "verify": return .verify
         case "repair": return .repair
         case "export-cache": return .exportCache

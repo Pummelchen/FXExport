@@ -33,7 +33,7 @@ let package = Package(
         .testTarget(name: "ClickHouseTests", dependencies: ["ClickHouse", "Domain"]),
         .testTarget(name: "IngestionTests", dependencies: ["Domain", "Ingestion", "ClickHouse", "MT5Bridge", "TimeMapping"]),
         .testTarget(name: "VerificationTests", dependencies: ["Domain", "Verification", "TimeMapping"]),
-        .testTarget(name: "OperationsTests", dependencies: ["Domain", "Config", "ClickHouse", "Operations"]),
+        .testTarget(name: "OperationsTests", dependencies: ["Domain", "Config", "ClickHouse", "TimeMapping", "Operations"]),
         .testTarget(name: "BacktestTests", dependencies: ["Domain", "BacktestCore"])
     ],
     swiftLanguageModes: [.v6]

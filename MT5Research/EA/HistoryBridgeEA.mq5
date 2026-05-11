@@ -1,5 +1,5 @@
 #property strict
-#property version   "0.1"
+#property version   "1.000"
 #property description "MT5Research localhost history bridge. Swift owns validation, storage, checkpoints, verification, and repair."
 
 input string SwiftHost = "127.0.0.1";
@@ -161,6 +161,8 @@ void HandleRequest(const string json)
       HandleLatestClosedM1(requestId, command, payload);
    else if(command == "GET_RATES_RANGE")
       HandleRatesRange(requestId, command, payload);
+   else if(command == "GET_RATES_FROM_POSITION")
+      HandleRatesFromPosition(requestId, command, payload);
    else
       SendError(requestId, command, "UNKNOWN_COMMAND", "Unsupported command");
 }
@@ -334,6 +336,81 @@ void HandleRatesRange(const string requestId, const string command, const string
       if(ts < fromTs || ts >= safeToExclusive || ts > latestClosed)
          continue;
 
+      if(emitted > 0)
+         response += ",";
+      response += "{";
+      response += "\"mt5_server_time\":" + IntegerToString(ts) + ",";
+      response += "\"open\":\"" + DoubleToString(rates[i].open, digits) + "\",";
+      response += "\"high\":\"" + DoubleToString(rates[i].high, digits) + "\",";
+      response += "\"low\":\"" + DoubleToString(rates[i].low, digits) + "\",";
+      response += "\"close\":\"" + DoubleToString(rates[i].close, digits) + "\"";
+      response += "}";
+      emitted++;
+   }
+   response += "]}";
+   SendOK(requestId, command, response);
+}
+
+void HandleRatesFromPosition(const string requestId, const string command, const string payload)
+{
+   string symbol = JsonStringField(payload, "mt5_symbol");
+   int startPos = (int)JsonLongField(payload, "start_pos");
+   int count = (int)JsonLongField(payload, "count");
+   int responseLimit = MaxBarsPerResponse;
+   if(responseLimit <= 0)
+      responseLimit = 50000;
+
+   if(symbol == "")
+   {
+      SendError(requestId, command, "PROTOCOL_ERROR", "GET_RATES_FROM_POSITION missing mt5_symbol");
+      return;
+   }
+   if(startPos < 1)
+   {
+      SendError(requestId, command, "PROTOCOL_ERROR", "GET_RATES_FROM_POSITION start_pos must be >= 1 so the open M1 bar is never returned");
+      return;
+   }
+   if(count <= 0)
+   {
+      SendError(requestId, command, "PROTOCOL_ERROR", "GET_RATES_FROM_POSITION count must be positive");
+      return;
+   }
+   if(count > responseLimit)
+   {
+      SendError(requestId, command, "PROTOCOL_ERROR", "GET_RATES_FROM_POSITION count exceeds MaxBarsPerResponse");
+      return;
+   }
+
+   MqlRates rates[];
+   ArraySetAsSeries(rates, false);
+   ResetLastError();
+   int copied = CopyRates(symbol, PERIOD_M1, startPos, count, rates);
+   if(copied < 0)
+   {
+      SendError(requestId, command, "COPY_RATES_FAILED", "CopyRates by position failed for " + symbol + ", error=" + IntegerToString(GetLastError()));
+      return;
+   }
+
+   int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+   SendRatesPayload(requestId, command, symbol, rates, copied, digits);
+}
+
+void SendRatesPayload(const string requestId, const string command, const string symbol, MqlRates &rates[], const int copied, const int digits)
+{
+   string response = "{";
+   response += "\"mt5_symbol\":\"" + JsonEscape(symbol) + "\",";
+   response += "\"timeframe\":\"M1\",";
+   response += "\"rates\":[";
+
+   bool reverse = false;
+   if(copied > 1 && rates[0].time > rates[copied - 1].time)
+      reverse = true;
+
+   int emitted = 0;
+   for(int j = 0; j < copied; j++)
+   {
+      int i = reverse ? copied - 1 - j : j;
+      long ts = (long)rates[i].time;
       if(emitted > 0)
          response += ",";
       response += "{";

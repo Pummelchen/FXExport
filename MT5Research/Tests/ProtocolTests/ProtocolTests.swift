@@ -47,4 +47,19 @@ final class ProtocolTests: XCTestCase {
             XCTAssertEqual(error as? ProtocolError, .invalidField("timestamp_sent_utc"))
         }
     }
+
+    func testRatesFromPositionPayloadIsFramedWithStartPosition() throws {
+        let codec = FramedProtocolCodec()
+        let payload = RatesFromPositionPayload(mt5Symbol: "EURUSD", startPosition: 1, count: 2)
+        let frame = try codec.encode(command: .getRatesFromPosition, requestId: "rates-pos", timestampSentUtc: .init(rawValue: 1), payload: payload)
+        var parser = FrameParser()
+        let bodies = try parser.append(frame)
+
+        let message = try codec.decode(bodies[0], payloadType: RatesFromPositionPayload.self)
+
+        XCTAssertEqual(message.command, .getRatesFromPosition)
+        XCTAssertEqual(message.payload.mt5Symbol, "EURUSD")
+        XCTAssertEqual(message.payload.startPosition, 1)
+        XCTAssertEqual(message.payload.count, 2)
+    }
 }

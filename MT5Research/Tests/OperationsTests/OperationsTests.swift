@@ -1,6 +1,7 @@
 import ClickHouse
 import Config
 import Domain
+import TimeMapping
 @testable import Operations
 import XCTest
 
@@ -107,6 +108,51 @@ final class OperationsTests: XCTestCase {
         XCTAssertEqual(stateInserts.count, 2)
         XCTAssertTrue(stateInserts[0].contains("\thealth_monitor\tok\tok\t10\t0\t10"))
         XCTAssertTrue(stateInserts[1].contains("\thealth_monitor\twarning\twarn\t10\t0\t20"))
+    }
+
+    func testMetaEditorWinePathArgumentUsesZDriveAbsolutePath() {
+        let url = URL(fileURLWithPath: "/tmp/Project/EA/HistoryBridgeEA.mq5")
+        XCTAssertEqual(
+            MetaEditorToolchain.winePathArgument(url),
+            "Z:\\tmp\\Project\\EA\\HistoryBridgeEA.mq5"
+        )
+    }
+
+    func testStartCheckDetectsOffsetCoverageGaps() throws {
+        let broker = try BrokerSourceId("demo")
+        let identity = try BrokerServerIdentity(company: "Broker Ltd", server: "Broker-Server", accountLogin: 1)
+        let map = try BrokerOffsetMap(
+            brokerSourceId: broker,
+            terminalIdentity: identity,
+            segments: [
+                BrokerOffsetSegment(
+                    brokerSourceId: broker,
+                    terminalIdentity: identity,
+                    validFrom: MT5ServerSecond(rawValue: 0),
+                    validTo: MT5ServerSecond(rawValue: 120),
+                    offset: OffsetSeconds(rawValue: 7200),
+                    source: .manual,
+                    confidence: .verified
+                ),
+                BrokerOffsetSegment(
+                    brokerSourceId: broker,
+                    terminalIdentity: identity,
+                    validFrom: MT5ServerSecond(rawValue: 240),
+                    validTo: MT5ServerSecond(rawValue: 360),
+                    offset: OffsetSeconds(rawValue: 7200),
+                    source: .manual,
+                    confidence: .verified
+                )
+            ]
+        )
+
+        let gaps = StartCheckRunner.coverageGaps(
+            in: map,
+            from: MT5ServerSecond(rawValue: 60),
+            toExclusive: MT5ServerSecond(rawValue: 300)
+        )
+
+        XCTAssertEqual(gaps, ["120..<240"])
     }
 }
 

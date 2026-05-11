@@ -50,3 +50,21 @@ public struct RatesRangePayload: Codable, Sendable {
         self.maxBars = maxBars
     }
 }
+
+public struct RatesFromPositionPayload: Codable, Sendable {
+    public let mt5Symbol: String
+    public let startPosition: Int
+    public let count: Int
+
+    enum CodingKeys: String, CodingKey {
+        case mt5Symbol = "mt5_symbol"
+        case startPosition = "start_pos"
+        case count
+    }
+
+    public init(mt5Symbol: String, startPosition: Int, count: Int) {
+        self.mt5Symbol = mt5Symbol
+        self.startPosition = startPosition
+        self.count = count
+    }
+}
