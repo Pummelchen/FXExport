@@ -4,6 +4,13 @@
   "log_level": "normal",
   "strict_symbol_failures": false,
   "verifier_random_ranges": 1,
+  "logging": {
+    "file_logging_enabled": true,
+    "log_file_path": "Logs/mt5research.log",
+    "alert_file_path": "Logs/alerts.jsonl",
+    "max_file_bytes": 10485760,
+    "max_rotated_files": 5
+  },
   "supervisor": {
     "cycle_seconds": 10,
     "health_check_interval_seconds": 30,
@@ -14,6 +21,9 @@
     "backup_check_interval_seconds": 3600,
     "alert_interval_seconds": 30,
     "stale_live_warning_seconds": 180,
+    "mt5_bridge_down_alert_seconds": 180,
+    "minimum_free_disk_bytes": 10737418240,
+    "clickhouse_disk_free_alert_bytes": 10737418240,
     "run_backfill_on_start": false,
     "repair_on_verifier_mismatch": true
   }

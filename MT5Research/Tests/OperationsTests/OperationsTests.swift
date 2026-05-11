@@ -21,6 +21,72 @@ final class OperationsTests: XCTestCase {
         let config = try JSONDecoder().decode(AppConfigFile.self, from: data)
 
         XCTAssertEqual(config.supervisor, .default)
+        XCTAssertEqual(config.logging, .default)
+    }
+
+    func testSupervisorConfigDefaultsNewAlertThresholdsWhenObjectIsPartial() throws {
+        let data = """
+        {
+          "chunk_size": 50000,
+          "live_scan_interval_seconds": 10,
+          "log_level": "normal",
+          "strict_symbol_failures": false,
+          "verifier_random_ranges": 3,
+          "supervisor": {
+            "cycle_seconds": 15
+          }
+        }
+        """.data(using: .utf8)!
+
+        let config = try JSONDecoder().decode(AppConfigFile.self, from: data)
+
+        XCTAssertEqual(config.supervisor.cycleSeconds, 15)
+        XCTAssertEqual(config.supervisor.mt5BridgeDownAlertSeconds, SupervisorConfig.default.mt5BridgeDownAlertSeconds)
+        XCTAssertEqual(config.supervisor.minimumFreeDiskBytes, SupervisorConfig.default.minimumFreeDiskBytes)
+        XCTAssertEqual(config.supervisor.clickHouseDiskFreeAlertBytes, SupervisorConfig.default.clickHouseDiskFreeAlertBytes)
+    }
+
+    func testPersistentLogSinkWritesJSONAndRotates() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mt5research-log-test-\(UUID().uuidString)", isDirectory: true)
+        let url = directory.appendingPathComponent("mt5research.log")
+        let sink = try PersistentLogSink(fileURL: url, maxFileBytes: 120, maxRotatedFiles: 1)
+        let logger = Logger(level: .normal, persistentLogSink: sink)
+
+        logger.info("persistent log smoke test")
+        let first = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertTrue(first.contains("\"level\":\"info\""))
+        XCTAssertTrue(first.contains("persistent log smoke test"))
+
+        for index in 0..<20 {
+            sink.write(level: "debug", component: "test", message: "rotation payload \(index)")
+        }
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: "\(url.path).1"))
+    }
+
+    func testAlertingAgentReportsSafetyBlocksAndDiskPressure() async throws {
+        let config = try makeConfig(minimumFreeDiskBytes: 1, clickHouseDiskFreeAlertBytes: 1)
+        let now = Int64(Date().timeIntervalSince1970)
+        let clickHouse = AlertingClickHouse(now: now)
+        let agent = AlertingAgent(intervalSeconds: 30)
+        let context = AgentRuntimeContext(
+            config: config,
+            clickHouse: clickHouse,
+            bridge: nil,
+            eventStore: InMemoryAgentEventStore(),
+            logger: Logger(level: .quiet),
+            supervisorStartedAtUtc: UtcSecond(rawValue: now - 60),
+            repairOnVerifierMismatch: false
+        )
+
+        let outcome = try await agent.run(context: context, startedAt: Date(timeIntervalSince1970: TimeInterval(now)))
+
+        XCTAssertEqual(outcome.status, .warning)
+        XCTAssertTrue(outcome.details.contains("utc_time_authority"))
+        XCTAssertTrue(outcome.details.contains("unresolved verification mismatches=2"))
+        XCTAssertTrue(outcome.details.contains("ClickHouse disk pressure"))
     }
 
     func testAgentSchedulerRunsStartupAgentsAndHonorsRunOnlyOnce() throws {
@@ -178,6 +244,7 @@ final class OperationsTests: XCTestCase {
         XCTAssertTrue(text.contains("Missing verified broker UTC offsets"))
         XCTAssertTrue(text.contains("Canonical insert readback verification failed"))
         XCTAssertTrue(text.contains("Backtest data readiness blocked"))
+        XCTAssertTrue(text.contains("Persistent logging unavailable"))
         XCTAssertTrue(text.contains("Disk full or ClickHouse storage pressure"))
         XCTAssertTrue(text.contains("Computer sleep, shutdown, or process interruption"))
     }
@@ -451,6 +518,38 @@ private actor BacktestGateClickHouse: ClickHouseClientProtocol {
     }
 }
 
+private actor AlertingClickHouse: ClickHouseClientProtocol {
+    private let now: Int64
+
+    init(now: Int64) {
+        self.now = now
+    }
+
+    func execute(_ query: ClickHouseQuery) async throws -> String {
+        let sql = query.sql
+        if sql.contains("runtime_agent_events") {
+            return "health_monitor\twarning\tClickHouse healthy, MT5 bridge is not connected\t\(now - 30)\n"
+        }
+        if sql.contains("runtime_agent_state FINAL") {
+            return """
+            utc_time_authority\tfailed\tBroker UTC offset mismatch\t0\t\(now - 300)\t\(now - 300)
+            symbol_metadata_drift\tok\tok\t\(now)\t0\t\(now)
+            live_m1_updater\tok\tok\t\(now)\t0\t\(now)
+            database_verifier_repairer\tok\tok\t\(now)\t0\t\(now)
+            checkpoint_gap_auditor\tok\tok\t\(now)\t0\t\(now)
+
+            """
+        }
+        if sql.contains("system.disks") {
+            return "default\t/var/lib/clickhouse\t0\t100\n"
+        }
+        if sql.contains("verification_results") {
+            return "2\n"
+        }
+        return "0\n"
+    }
+}
+
 private actor StartupClickHouse: ClickHouseClientProtocol {
     private var failuresBeforeSuccess: Int
 
@@ -490,14 +589,21 @@ private actor RecordingCommandRunner: SystemCommandRunning {
     }
 }
 
-private func makeConfig() throws -> ConfigBundle {
+private func makeConfig(
+    minimumFreeDiskBytes: Int64 = SupervisorConfig.default.minimumFreeDiskBytes,
+    clickHouseDiskFreeAlertBytes: Int64 = SupervisorConfig.default.clickHouseDiskFreeAlertBytes
+) throws -> ConfigBundle {
     let appData = """
     {
       "chunk_size": 50000,
       "live_scan_interval_seconds": 10,
       "log_level": "normal",
       "strict_symbol_failures": false,
-      "verifier_random_ranges": 0
+      "verifier_random_ranges": 0,
+      "supervisor": {
+        "minimum_free_disk_bytes": \(minimumFreeDiskBytes),
+        "clickhouse_disk_free_alert_bytes": \(clickHouseDiskFreeAlertBytes)
+      }
     }
     """.data(using: .utf8)!
     return ConfigBundle(

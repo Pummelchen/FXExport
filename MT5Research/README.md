@@ -143,6 +143,22 @@ Edit every file before production use.
 
 ClickHouse credentials belong only in local ignored files under `Config/`. The Swift HTTP client sends credentials with an HTTP Basic Authorization header and does not put the password into the request URL.
 
+### Persistent Logs And Alerts
+
+`Config/app.json` controls durable terminal logs and alert files:
+
+```json
+"logging": {
+  "file_logging_enabled": true,
+  "log_file_path": "Logs/mt5research.log",
+  "alert_file_path": "Logs/alerts.jsonl",
+  "max_file_bytes": 10485760,
+  "max_rotated_files": 5
+}
+```
+
+Paths are resolved relative to the package working directory unless absolute. Logs are JSONL and rotate by size. Alert events are also written to the normal log and to `alert_file_path`, so unattended runs can be watched without scraping terminal output. `Logs/` is local runtime state and is ignored by Git.
+
 ### Symbols
 
 `Config/symbols.json` explicitly maps logical symbols to MT5 broker symbols:
@@ -368,11 +384,17 @@ The supervisor sorts due agents by explicit priority before every cycle:
 | 70 | `database_verifier_repairer` | 3600s | Runs DB checks, MT5 random cross-checks, and safe canonical repair. |
 | 80 | `checkpoint_gap_auditor` | 300s | Checks checkpoint/canonical consistency and live lag. |
 | 90 | `backup_readiness` | 3600s | Verifies canonical data exists for backup/export workflows. |
-| 100 | `alerting` | 30s | Summarizes recent supervisor warnings/errors. |
+| 100 | `alerting` | 30s | Raises persistent alerts for runtime failures, stale safety agents, verifier/repair blockers, MT5 bridge outages, and disk pressure. |
 
 Supersedence rules are conservative. `history_importer` blocks live updates, verifier/repair, checkpoint audit, and backup readiness for that cycle because it owns canonical writes and checkpoints during first-run/resume. A failed or warning UTC authority blocks ingestion and verification because canonical UTC cannot be trusted. Symbol metadata failures block ingestion and verification. Verifier or checkpoint warnings block backup readiness. Health failures block all MT5-dependent and data-quality agents. Dynamic supersedence persists across cycles until the source agent reports OK, so a failed UTC or symbol check cannot be bypassed merely because its next scheduled check is not due yet. A failed first-run importer is retried on the checkpoint-audit interval instead of being marked completed.
 
 Supervisor intervals are configured under `supervisor` in `Config/app.json`. The default production stance is to leave backfill disabled in the supervisor and run it deliberately, then use `supervise` for ongoing operation.
+
+The alerting agent also uses these thresholds:
+
+- `mt5_bridge_down_alert_seconds`: how long MT5-sensitive failed agent state can persist before it is reported as a bridge outage.
+- `minimum_free_disk_bytes`: local filesystem free-space alert threshold.
+- `clickhouse_disk_free_alert_bytes`: ClickHouse `system.disks` free-space alert threshold.
 
 ## Current Implementation Status
 
@@ -381,6 +403,7 @@ Implemented:
 - Swift Package Manager project.
 - Strong domain types.
 - ANSI terminal logger with `NO_COLOR` support.
+- Persistent JSONL log and alert files with size-based rotation.
 - JSON config loading.
 - DB-backed verified broker offset authority and explicit UTC conversion.
 - M1 OHLC validation.
@@ -390,6 +413,7 @@ Implemented:
 - Backfill/live update agents with MT5 history synchronization checks, conflict recording, checkpoint-after-canonical-readback flow, and canonical range replacement.
 - Production supervisor with ten operational agents, priority/supersedence rules, broker runtime lock, and runtime event/state tables.
 - Operational failure guide command with action-oriented recovery advice for unattended operation.
+- Alerting agent checks for failed/stale safety agents, MT5 bridge outage state, ClickHouse/local disk pressure, unresolved verification mismatches, and failed repair outcomes. Heavy canonical duplicate/OHLC/offset scans stay owned by the verifier agent instead of running every alert cycle.
 - Resilient live updater that reconnects the MT5 bridge and retries local ClickHouse recovery with backoff without advancing checkpoints on failed batches.
 - Backtest/optimize readiness gate that blocks on incomplete first-run ingest, damaged canonical data, unresolved verification/repair state, or stale safety-agent OK state.
 - `startcheck` go-live gate with ClickHouse checks, MetaEditor EA compile, MT5 terminal identity validation, verified broker UTC offset coverage, and `GET_RATES_FROM_POSITION` smoke testing.

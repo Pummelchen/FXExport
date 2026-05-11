@@ -9,6 +9,7 @@ MT5Research/Package.resolved
 MT5Research/Config/
 
 # MT5 compiled artifacts and logs
+MT5Research/Logs/
 *.ex5
 *.log
 

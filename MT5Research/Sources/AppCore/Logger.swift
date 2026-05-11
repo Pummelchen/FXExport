@@ -23,57 +23,73 @@ public enum LogLevel: String, Codable, Sendable, Comparable {
 public struct Logger: Sendable {
     public let level: LogLevel
     private let colorPolicy: TerminalColorPolicy
+    private let persistentLogSink: PersistentLogSink?
+    private let alertSink: PersistentLogSink?
 
-    public init(level: LogLevel = .normal, colorPolicy: TerminalColorPolicy = TerminalColorPolicy()) {
+    public init(
+        level: LogLevel = .normal,
+        colorPolicy: TerminalColorPolicy = TerminalColorPolicy(),
+        persistentLogSink: PersistentLogSink? = nil,
+        alertSink: PersistentLogSink? = nil
+    ) {
         self.level = level
         self.colorPolicy = colorPolicy
+        self.persistentLogSink = persistentLogSink
+        self.alertSink = alertSink
     }
 
     public func info(_ message: String) {
         guard level >= .normal else { return }
-        emit("[INFO] ", message, color: .cyan)
+        emit("[INFO] ", message, color: .cyan, levelName: "info", component: "app")
     }
 
     public func ok(_ message: String) {
         guard level >= .normal else { return }
-        emit("[OK]   ", message, color: .green)
+        emit("[OK]   ", message, color: .green, levelName: "ok", component: "app")
     }
 
     public func warn(_ message: String) {
         guard level >= .quiet else { return }
-        emit("[WARN] ", message, color: .yellow)
+        emit("[WARN] ", message, color: .yellow, levelName: "warning", component: "app")
     }
 
     public func error(_ message: String) {
-        emit("[ERROR]", " " + message, color: .red)
+        emit("[ERROR]", " " + message, color: .red, levelName: "error", component: "app")
+    }
+
+    public func alert(_ message: String, details: String = "") {
+        let fullMessage = details.isEmpty ? message : "\(message) | \(details)"
+        emit("[ALERT]", " " + fullMessage, color: .red, levelName: "alert", component: "alert")
+        alertSink?.write(level: "alert", component: "alert", message: fullMessage)
     }
 
     public func verify(_ message: String) {
         guard level >= .normal else { return }
-        emit("[VERIFY]", " " + message, color: .magenta)
+        emit("[VERIFY]", " " + message, color: .magenta, levelName: "verify", component: "verification")
     }
 
     public func repair(_ message: String) {
         guard level >= .normal else { return }
-        emit("[REPAIR]", " " + message, color: .magenta)
+        emit("[REPAIR]", " " + message, color: .magenta, levelName: "repair", component: "repair")
     }
 
     public func db(_ message: String) {
         guard level >= .normal else { return }
-        emit("[DB]   ", message, color: .blue)
+        emit("[DB]   ", message, color: .blue, levelName: "database", component: "clickhouse")
     }
 
     public func verbose(_ message: String) {
         guard level >= .verbose else { return }
-        emit("[DETAIL]", " " + message, color: .gray)
+        emit("[DETAIL]", " " + message, color: .gray, levelName: "detail", component: "app")
     }
 
     public func debug(_ message: String) {
         guard level >= .debug else { return }
-        emit("[DEBUG]", " " + message, color: .gray)
+        emit("[DEBUG]", " " + message, color: .gray, levelName: "debug", component: "app")
     }
 
-    private func emit(_ prefix: String, _ message: String, color: TerminalColor) {
+    private func emit(_ prefix: String, _ message: String, color: TerminalColor, levelName: String, component: String) {
         print(colorPolicy.colorize(prefix, as: color) + message)
+        persistentLogSink?.write(level: levelName, component: component, message: message)
     }
 }

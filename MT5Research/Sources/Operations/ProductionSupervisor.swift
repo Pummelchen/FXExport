@@ -177,15 +177,9 @@ public struct ProductionSupervisor: Sendable {
         case .ok:
             logger.ok(message)
         case .warning:
-            logger.warn(message)
-            if !outcome.details.isEmpty {
-                logger.verbose(outcome.details)
-            }
+            logger.alert(message, details: outcome.details)
         case .failed:
-            logger.error(message)
-            if !outcome.details.isEmpty {
-                logger.verbose(outcome.details)
-            }
+            logger.alert(message, details: outcome.details)
         case .skipped:
             logger.info(message)
         }

@@ -93,6 +93,7 @@ public struct ConfigLoader: Sendable {
             throw ConfigError.invalidValue("verifier_random_ranges must not be negative")
         }
         try validateSupervisor(app.supervisor)
+        try validateLogging(app.logging)
         guard !clickHouse.database.isEmpty else { throw ConfigError.invalidValue("ClickHouse database is empty") }
         guard Self.isSafeClickHouseIdentifier(clickHouse.database) else {
             throw ConfigError.invalidValue("ClickHouse database must contain only letters, digits, and underscores, and must not start with a digit")
@@ -184,12 +185,34 @@ public struct ConfigLoader: Sendable {
             ("supervisor.checkpoint_audit_interval_seconds", supervisor.checkpointAuditIntervalSeconds),
             ("supervisor.backup_check_interval_seconds", supervisor.backupCheckIntervalSeconds),
             ("supervisor.alert_interval_seconds", supervisor.alertIntervalSeconds),
-            ("supervisor.stale_live_warning_seconds", supervisor.staleLiveWarningSeconds)
+            ("supervisor.stale_live_warning_seconds", supervisor.staleLiveWarningSeconds),
+            ("supervisor.mt5_bridge_down_alert_seconds", supervisor.mt5BridgeDownAlertSeconds)
         ]
         for (name, value) in intervals {
             guard value > 0 else {
                 throw ConfigError.invalidValue("\(name) must be greater than zero")
             }
+        }
+        guard supervisor.minimumFreeDiskBytes > 0 else {
+            throw ConfigError.invalidValue("supervisor.minimum_free_disk_bytes must be greater than zero")
+        }
+        guard supervisor.clickHouseDiskFreeAlertBytes > 0 else {
+            throw ConfigError.invalidValue("supervisor.clickhouse_disk_free_alert_bytes must be greater than zero")
+        }
+    }
+
+    private func validateLogging(_ logging: OperationalLoggingConfig) throws {
+        guard logging.maxFileBytes >= 1024 else {
+            throw ConfigError.invalidValue("logging.max_file_bytes must be at least 1024")
+        }
+        guard (0...100).contains(logging.maxRotatedFiles) else {
+            throw ConfigError.invalidValue("logging.max_rotated_files must be between 0 and 100")
+        }
+        guard !logging.logFilePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ConfigError.invalidValue("logging.log_file_path must not be empty")
+        }
+        guard !logging.alertFilePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ConfigError.invalidValue("logging.alert_file_path must not be empty")
         }
     }
 

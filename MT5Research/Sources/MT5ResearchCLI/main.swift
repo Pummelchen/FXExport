@@ -19,6 +19,7 @@ struct MT5ResearchCLI {
     }
 
     static func run(arguments: [String]) async -> ExitCode {
+        var activeLogger: Logger?
         do {
             let options = try CLIOptions(arguments: arguments)
             if options.command == .help {
@@ -32,7 +33,8 @@ struct MT5ResearchCLI {
 
             let loader = ConfigLoader()
             let config = try loader.loadBundle(configDirectory: options.configDirectory)
-            let logger = Logger(level: options.overrideLogLevel ?? config.app.logLevel)
+            let logger = makeLogger(config: config, options: options)
+            activeLogger = logger
             let clickHouse = ClickHouseHTTPClient(config: config.clickHouse, logger: logger)
             if options.command.requiresClickHouseStartupCheck {
                 try await ClickHouseStartupManager(
@@ -243,49 +245,61 @@ struct MT5ResearchCLI {
         } catch let error as TerminalIdentityPolicyError {
             print("[ERROR] MT5 terminal identity problem")
             print(OperationalFailureGuide.advice(for: error).formatted)
+            activeLogger?.alert("MT5 terminal identity problem", details: error.description)
             return .configuration
         } catch let error as BrokerOffsetRuntimeError {
             print("[ERROR] Broker UTC offset problem")
             print(OperationalFailureGuide.advice(for: error).formatted)
+            activeLogger?.alert("Broker UTC offset problem", details: error.description)
             return .configuration
         } catch let error as ClickHouseStartupError {
             print("[ERROR] ClickHouse startup check failed")
             print(OperationalFailureGuide.advice(for: error).formatted)
+            activeLogger?.alert("ClickHouse startup check failed", details: error.description)
             return .clickHouse
         } catch let error as SupervisorError {
             print("[ERROR] Runtime lock: \(error.description)")
             print(OperationalFailureGuide.advice(for: error).formatted)
+            activeLogger?.alert("Runtime lock unavailable", details: error.description)
             return .configuration
         } catch let error as BacktestReadinessError {
             print("[ERROR] Backtest readiness blocked")
             print(OperationalFailureGuide.advice(for: error).formatted)
+            activeLogger?.alert("Backtest readiness blocked", details: error.description)
             return .backtest
         } catch let error as TimeMappingError {
             print("[ERROR] Broker UTC offset problem")
             print(OperationalFailureGuide.advice(for: error).formatted)
+            activeLogger?.alert("Broker UTC offset problem", details: error.description)
             return .configuration
         } catch let error as VerificationError {
             print("[ERROR] Verification failed")
             print(OperationalFailureGuide.advice(for: error).formatted)
+            activeLogger?.alert("Verification failed", details: error.description)
             return .verification
         } catch let error as MT5BridgeStartupError {
             print("[ERROR] MT5 bridge startup check failed")
             print(error.description)
+            activeLogger?.alert("MT5 bridge startup check failed", details: error.description)
             return .mt5Bridge
         } catch let error as ProtocolError {
             print("[ERROR] MT5 bridge protocol check failed")
             print(OperationalFailureGuide.advice(for: error).formatted)
+            activeLogger?.alert("MT5 bridge protocol check failed", details: error.description)
             return .mt5Bridge
         } catch let error as MT5BridgeError {
             print("[ERROR] MT5 bridge is not ready")
             print(OperationalFailureGuide.advice(for: error).formatted)
+            activeLogger?.alert("MT5 bridge is not ready", details: error.description)
             return .mt5Bridge
         } catch let error as ClickHouseError {
             print("[ERROR] ClickHouse operation failed")
             print(OperationalFailureGuide.advice(for: error).formatted)
+            activeLogger?.alert("ClickHouse operation failed", details: error.description)
             return .clickHouse
         } catch {
             print("[ERROR] \(error)")
+            activeLogger?.alert("Unexpected command failure", details: String(describing: error))
             return .unknown
         }
     }
@@ -312,6 +326,61 @@ struct MT5ResearchCLI {
             }
         } catch let error as MT5BridgeError {
             throw MT5BridgeStartupError(error: error, config: config.mt5Bridge)
+        }
+    }
+
+    private static func makeLogger(config: ConfigBundle, options: CLIOptions) -> Logger {
+        let level = options.overrideLogLevel ?? config.app.logLevel
+        guard config.app.logging.fileLoggingEnabled else {
+            return Logger(level: level)
+        }
+
+        let baseDirectory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        var startupWarnings: [String] = []
+        let logSink = makePersistentSink(
+            path: config.app.logging.logFilePath,
+            baseDirectory: baseDirectory,
+            maxFileBytes: config.app.logging.maxFileBytes,
+            maxRotatedFiles: config.app.logging.maxRotatedFiles,
+            warnings: &startupWarnings
+        )
+        let alertSink = makePersistentSink(
+            path: config.app.logging.alertFilePath,
+            baseDirectory: baseDirectory,
+            maxFileBytes: config.app.logging.maxFileBytes,
+            maxRotatedFiles: config.app.logging.maxRotatedFiles,
+            warnings: &startupWarnings
+        )
+        let logger = Logger(level: level, persistentLogSink: logSink, alertSink: alertSink)
+        if logSink != nil {
+            logger.info("Persistent log file enabled: \(config.app.logging.logFilePath)")
+        }
+        if alertSink != nil {
+            logger.info("Persistent alert file enabled: \(config.app.logging.alertFilePath)")
+        }
+        for warning in startupWarnings {
+            logger.warn(warning)
+        }
+        return logger
+    }
+
+    private static func makePersistentSink(
+        path: String,
+        baseDirectory: URL,
+        maxFileBytes: UInt64,
+        maxRotatedFiles: Int,
+        warnings: inout [String]
+    ) -> PersistentLogSink? {
+        do {
+            let url = try PersistentLogSink.resolvedURL(path: path, baseDirectory: baseDirectory)
+            return try PersistentLogSink(
+                fileURL: url,
+                maxFileBytes: maxFileBytes,
+                maxRotatedFiles: maxRotatedFiles
+            )
+        } catch {
+            warnings.append("Persistent logging path '\(path)' is disabled: \(error)")
+            return nil
         }
     }
 
@@ -363,20 +432,20 @@ struct MT5ResearchCLI {
                         try await agent.runOnce()
                         try await Task.sleep(nanoseconds: scanNanoseconds)
                     } catch let error as MT5BridgeError {
-                        logger.warn("MT5 bridge disconnected; will reconnect. \(error.description)")
+                        logger.alert("MT5 bridge disconnected; live updater will reconnect", details: error.description)
                         break
                     } catch let error as ProtocolError {
-                        logger.warn("MT5 bridge protocol failed; will reconnect after EA check. \(error.description)")
+                        logger.alert("MT5 bridge protocol failed; live updater will reconnect after EA check", details: error.description)
                         logger.verbose(OperationalFailureGuide.advice(for: error).formatted)
                         break
                     } catch let error as ClickHouseError {
-                        logger.warn("ClickHouse failed during live update; attempting local recovery")
+                        logger.alert("ClickHouse failed during live update; attempting local recovery", details: error.description)
                         logger.verbose(OperationalFailureGuide.advice(for: error).formatted)
                         if await recoverClickHouse(config: config, clickHouse: clickHouse, logger: logger) {
                             clickHouseBackoffSeconds = UInt64(max(10, config.app.liveScanIntervalSeconds))
                             try await Task.sleep(nanoseconds: scanNanoseconds)
                         } else {
-                            logger.warn("ClickHouse is still unavailable; retrying database recovery in \(clickHouseBackoffSeconds)s")
+                            logger.alert("ClickHouse is still unavailable; retrying database recovery in \(clickHouseBackoffSeconds)s")
                             try await Task.sleep(nanoseconds: clickHouseBackoffSeconds * 1_000_000_000)
                             clickHouseBackoffSeconds = min(300, clickHouseBackoffSeconds * 2)
                         }
@@ -387,10 +456,10 @@ struct MT5ResearchCLI {
                     }
                 }
             } catch let error as MT5BridgeStartupError {
-                logger.warn("MT5 bridge unavailable; retrying in \(bridgeBackoffSeconds)s")
+                logger.alert("MT5 bridge unavailable; retrying in \(bridgeBackoffSeconds)s", details: error.description)
                 logger.verbose(error.description)
             } catch let error as MT5BridgeError {
-                logger.warn("MT5 bridge unavailable; retrying in \(bridgeBackoffSeconds)s")
+                logger.alert("MT5 bridge unavailable; retrying in \(bridgeBackoffSeconds)s", details: error.description)
                 logger.verbose(OperationalFailureGuide.advice(for: error).formatted)
             }
 

@@ -311,6 +311,15 @@ public enum OperationalFailureGuide {
             commands: ["mt5research supervise --config-dir Config --supervisor-cycles 1", "mt5research verify --config-dir Config --random-ranges 20"]
         ),
         scenario(
+            code: "LOG-001",
+            title: "Persistent logging unavailable",
+            summary: "The configured log or alert file cannot be created, written, or rotated.",
+            automaticRecovery: "Terminal logging continues; the affected persistent sink is disabled for that process.",
+            dataSafety: "Ingestion and checkpoints do not depend on log-file writes, but unattended monitoring is degraded.",
+            steps: ["Fix the configured log directory permissions or disk space.", "Rerun startcheck or supervise and confirm the persistent log file enabled message appears."],
+            commands: ["mkdir -p Logs", "df -h", "mt5research startcheck --config-dir Config --migrations-dir Migrations --skip-bridge"]
+        ),
+        scenario(
             code: "CONFIG-001",
             title: "Invalid configuration",
             summary: "A required config file or value is missing or invalid.",
