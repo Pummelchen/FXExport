@@ -59,11 +59,17 @@ public final class MT5Connection: @unchecked Sendable {
         close()
     }
 
-    public static func connect(host: String, port: UInt16, timeoutSeconds: Double = 10, maxFrameBytes: Int = 16 * 1024 * 1024) throws -> MT5Connection {
+    public static func connect(
+        host: String,
+        port: UInt16,
+        connectTimeoutSeconds: Double = 10,
+        requestTimeoutSeconds: Double = 10,
+        maxFrameBytes: Int = 16 * 1024 * 1024
+    ) throws -> MT5Connection {
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         guard fd >= 0 else { throw MT5BridgeError.socketCreateFailed(errno: errno) }
         do {
-            try configureTimeouts(fd: fd, timeoutSeconds: timeoutSeconds)
+            try configureTimeouts(fd: fd, timeoutSeconds: connectTimeoutSeconds)
         } catch {
             Darwin.close(fd)
             throw error
@@ -80,10 +86,22 @@ public final class MT5Connection: @unchecked Sendable {
             Darwin.close(fd)
             throw MT5BridgeError.connectFailed(host: host, port: port, errno: savedErrno)
         }
+        do {
+            try configureTimeouts(fd: fd, timeoutSeconds: requestTimeoutSeconds)
+        } catch {
+            Darwin.close(fd)
+            throw error
+        }
         return MT5Connection(fd: fd, maxFrameBytes: maxFrameBytes)
     }
 
-    public static func listenOnce(host: String, port: UInt16, timeoutSeconds: Double = 30, maxFrameBytes: Int = 16 * 1024 * 1024) throws -> MT5Connection {
+    public static func listenOnce(
+        host: String,
+        port: UInt16,
+        connectTimeoutSeconds: Double = 30,
+        requestTimeoutSeconds: Double = 10,
+        maxFrameBytes: Int = 16 * 1024 * 1024
+    ) throws -> MT5Connection {
         let serverFD = socket(AF_INET, SOCK_STREAM, 0)
         guard serverFD >= 0 else { throw MT5BridgeError.socketCreateFailed(errno: errno) }
         var reuse: Int32 = 1
@@ -109,7 +127,7 @@ public final class MT5Connection: @unchecked Sendable {
 
         let isReadable: Bool
         do {
-            isReadable = try waitForReadable(fd: serverFD, timeoutSeconds: timeoutSeconds)
+            isReadable = try waitForReadable(fd: serverFD, timeoutSeconds: connectTimeoutSeconds)
         } catch {
             Darwin.close(serverFD)
             throw error
@@ -126,7 +144,7 @@ public final class MT5Connection: @unchecked Sendable {
         Darwin.close(serverFD)
         guard clientFD >= 0 else { throw MT5BridgeError.acceptFailed(errno: errno) }
         do {
-            try configureTimeouts(fd: clientFD, timeoutSeconds: timeoutSeconds)
+            try configureTimeouts(fd: clientFD, timeoutSeconds: requestTimeoutSeconds)
         } catch {
             Darwin.close(clientFD)
             throw error

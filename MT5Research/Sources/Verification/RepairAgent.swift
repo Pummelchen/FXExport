@@ -68,6 +68,8 @@ public struct RepairAgent: Sendable {
             SETTINGS mutations_sync = 1
             """
             do {
+                try await CanonicalConflictRecorder(clickHouse: clickHouse, insertBuilder: insertBuilder)
+                    .recordConflictsBeforeCanonicalReplace(replacementBars, detectedAtUtc: UtcSecond(rawValue: Int64(Date().timeIntervalSince1970)))
                 _ = try await clickHouse.execute(.mutation(deleteSQL, idempotent: true))
                 _ = try await clickHouse.execute(insertQuery)
                 try await CanonicalInsertVerifier(clickHouse: clickHouse, insertBuilder: insertBuilder).verify(replacementBars)

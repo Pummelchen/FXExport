@@ -24,6 +24,12 @@ public struct DatabaseVerifierRepairProductionAgent: ProductionAgent {
             logger: context.logger
         ).startupChecks(randomRanges: 0)
 
+        let configuredRandomRanges = context.config.app.verifierRandomRanges
+        guard configuredRandomRanges > 0 else {
+            return AgentOutcomeFactory(kind: descriptor.kind, startedAt: startedAt)
+                .ok("Database checks completed; MT5 random cross-check is disabled")
+        }
+
         guard let bridge = context.bridge else {
             return AgentOutcomeFactory(kind: descriptor.kind, startedAt: startedAt)
                 .warning("Database checks completed; MT5 cross-check skipped because bridge is not connected")
@@ -50,7 +56,7 @@ public struct DatabaseVerifierRepairProductionAgent: ProductionAgent {
         var mismatchCount = 0
         var warnings: [String] = []
 
-        for _ in 0..<max(1, context.config.app.verifierRandomRanges) {
+        for _ in 0..<configuredRandomRanges {
             guard let mapping = context.config.symbols.symbols.randomElement(using: &generator) else {
                 break
             }

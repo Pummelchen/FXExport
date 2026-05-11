@@ -10,13 +10,33 @@ public final class MT5BridgeClient: @unchecked Sendable {
         self.codec = codec
     }
 
-    public static func connect(host: String, port: UInt16, timeoutSeconds: Double) throws -> MT5BridgeClient {
-        let connection = try MT5Connection.connect(host: host, port: port, timeoutSeconds: timeoutSeconds)
+    public static func connect(
+        host: String,
+        port: UInt16,
+        connectTimeoutSeconds: Double,
+        requestTimeoutSeconds: Double
+    ) throws -> MT5BridgeClient {
+        let connection = try MT5Connection.connect(
+            host: host,
+            port: port,
+            connectTimeoutSeconds: connectTimeoutSeconds,
+            requestTimeoutSeconds: requestTimeoutSeconds
+        )
         return MT5BridgeClient(connection: connection)
     }
 
-    public static func listen(host: String, port: UInt16, timeoutSeconds: Double) throws -> MT5BridgeClient {
-        let connection = try MT5Connection.listenOnce(host: host, port: port, timeoutSeconds: timeoutSeconds)
+    public static func listen(
+        host: String,
+        port: UInt16,
+        connectTimeoutSeconds: Double,
+        requestTimeoutSeconds: Double
+    ) throws -> MT5BridgeClient {
+        let connection = try MT5Connection.listenOnce(
+            host: host,
+            port: port,
+            connectTimeoutSeconds: connectTimeoutSeconds,
+            requestTimeoutSeconds: requestTimeoutSeconds
+        )
         return MT5BridgeClient(connection: connection)
     }
 

@@ -128,6 +128,7 @@ public struct HistoricalRangeVerifier: Sendable {
             let closedBars = try response.rates.map {
                 try $0.toClosedM1Bar(logicalSymbol: mapping.logicalSymbol, mt5Symbol: mapping.mt5Symbol, digits: mapping.digits)
             }
+            try validateClosedBarsInRange(closedBars, from: cursor, toExclusive: chunkEnd)
             let context = OhlcValidationContext(
                 brokerSourceId: range.brokerSourceId,
                 expectedLogicalSymbol: mapping.logicalSymbol,
@@ -141,6 +142,15 @@ public struct HistoricalRangeVerifier: Sendable {
             cursor = chunkEnd
         }
         return output
+    }
+
+    private func validateClosedBarsInRange(_ bars: [ClosedM1Bar], from: MT5ServerSecond, toExclusive: MT5ServerSecond) throws {
+        for bar in bars {
+            guard bar.mt5ServerTime.rawValue >= from.rawValue,
+                  bar.mt5ServerTime.rawValue < toExclusive.rawValue else {
+                throw HistoricalRangeVerifierError.invalidMT5Response("bar \(bar.mt5ServerTime.rawValue) is outside requested range \(from.rawValue)..<\(toExclusive.rawValue)")
+            }
+        }
     }
 
     private func writeVerificationResult(range: VerificationRange, result: VerificationResult) async throws {

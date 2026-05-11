@@ -19,6 +19,11 @@ final class DomainTests: XCTestCase {
         XCTAssertThrowsError(try PriceScaled.fromDecimalString("1.083429", digits: try Digits(5)))
     }
 
+    func testDigitsRejectsOutOfRangeValues() {
+        XCTAssertThrowsError(try Digits(-1))
+        XCTAssertThrowsError(try Digits(11))
+    }
+
     func testTimestampTypeSeparation() {
         let mt5 = MT5ServerSecond(rawValue: 1_700_000_000)
         let utc = UtcSecond(rawValue: 1_700_000_000)

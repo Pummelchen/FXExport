@@ -223,7 +223,7 @@ This creates:
 
 Raw audit data is append-only. Repairs only target canonical data and must preserve conflicts and repair logs.
 
-Canonical ingestion is replace-by-range for the affected broker/source/symbol range. The delete predicate covers both the raw MT5 server-time range and the converted UTC identity range before reinserting verified rows. After the replacement insert, Swift reads the canonical range back from ClickHouse and verifies row count plus unique MT5 and UTC timestamp counts before advancing the checkpoint. This prevents duplicate canonical bars after a crash between insert and checkpoint update, and also catches older rows written under a wrong UTC mapping. Raw audit rows remain append-only.
+Canonical ingestion is replace-by-range for the affected broker/source/symbol range. Before replacing a canonical range, Swift reads existing canonical rows for the same UTC identities and writes `ohlc_m1_conflicts` rows for any differing OHLC/hash values. The delete predicate then covers both the raw MT5 server-time range and the converted UTC identity range before reinserting verified rows. After the replacement insert, Swift reads the canonical range back from ClickHouse and verifies row count, unique MT5 and UTC timestamp counts, and the exact MT5 timestamp/UTC/hash sequence before advancing the checkpoint. This prevents duplicate canonical bars after a crash between insert and checkpoint update, catches older rows written under a wrong UTC mapping, and preserves conflicting canonical versions for audit. Raw audit rows remain append-only.
 
 ## Crash Or Abort Recovery
 
@@ -240,6 +240,8 @@ Safe recovery sequence:
 ```
 
 Backfill is designed to be rerun. A checkpoint is advanced only after raw insert, canonical range replacement, canonical insert, and canonical readback verification all succeed. If the process crashes before that point, rerunning backfill starts again from the last verified checkpoint. Canonical rows for the retried range are deleted and reinserted by both MT5 server-time range and UTC identity range, so duplicate canonical bars should not accumulate.
+
+Before oldest/latest discovery for each symbol, backfill asks the EA for MT5 M1 history status and waits up to 60 seconds for synchronization. If MT5 has not synchronized local history, backfill stops for that symbol instead of snapshotting a partial oldest/latest range.
 
 If MT5 exposes older historical bars after the first partial run, backfill now detects that the newly discovered oldest MT5 bar is earlier than the stored checkpoint oldest and reprocesses from the new oldest bar. This is conservative but prevents silent holes at the beginning of history.
 
@@ -305,6 +307,10 @@ Global options:
 
 Use `--skip-bridge` only for the early preflight before the EA is attached. A production go-live run should use full `startcheck` without skips.
 
+`symbol-check` returns a non-zero validation exit code if any configured symbol is missing, not selected, or has different digits than `Config/symbols.json`.
+
+`verify --random-ranges 0` runs DB-only duplicate/OHLC/UTC-confidence checks without opening the MT5 bridge. If random ranges are requested, the command connects to the EA and fails the command if any MT5 cross-check mismatches canonical data.
+
 `repair --from` and `--to` are UTC dates in `YYYY-MM-DD` format. Repair first verifies the requested range against MT5, repairs canonical rows only when the mismatch is unambiguous and UTC mapping is verified, writes `repair_log`, and then verifies the range again. Raw audit rows are never deleted.
 
 ## Production Supervisor Agents
@@ -337,9 +343,9 @@ Implemented:
 - DB-backed verified broker offset authority and explicit UTC conversion.
 - M1 OHLC validation.
 - Deterministic framed JSON protocol.
-- TCP socket transport in Swift.
+- TCP socket transport in Swift with separate connect/accept timeout and request read/write timeout.
 - ClickHouse HTTP client and migrations.
-- Backfill/live update agents with checkpoint-after-canonical-readback flow and canonical range replacement.
+- Backfill/live update agents with MT5 history synchronization checks, conflict recording, checkpoint-after-canonical-readback flow, and canonical range replacement.
 - Production supervisor with ten operational agents and runtime event/state tables.
 - `startcheck` go-live gate with ClickHouse checks, MetaEditor EA compile, MT5 terminal identity validation, verified broker UTC offset coverage, and `GET_RATES_FROM_POSITION` smoke testing.
 - Startup verifier checks plus random historical MT5-vs-ClickHouse range comparison.

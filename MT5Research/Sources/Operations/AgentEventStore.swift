@@ -6,6 +6,17 @@ public protocol AgentEventStore: Sendable {
     func record(_ outcome: AgentOutcome, brokerSourceId: BrokerSourceId) async throws
 }
 
+public enum AgentEventStoreError: Error, CustomStringConvertible, Sendable {
+    case invalidRuntimeStateRow(String)
+
+    public var description: String {
+        switch self {
+        case .invalidRuntimeStateRow(let row):
+            return "Invalid runtime_agent_state row: \(row)"
+        }
+    }
+}
+
 public struct ClickHouseAgentEventStore: AgentEventStore {
     private let clickHouse: ClickHouseClientProtocol
     private let database: String
@@ -87,7 +98,7 @@ public struct ClickHouseAgentEventStore: AgentEventStore {
         guard fields.count >= 2,
               let lastOk = Int64(fields[0]),
               let lastError = Int64(fields[1]) else {
-            return nil
+            throw AgentEventStoreError.invalidRuntimeStateRow(trimmed)
         }
         return (lastOk, lastError)
     }

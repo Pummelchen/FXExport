@@ -22,6 +22,11 @@ public struct VerificationAgent: Sendable {
     }
 
     public func startupChecks(randomRanges: Int) async throws {
+        guard randomRanges >= 0 else {
+            throw VerificationError.invalidRandomRangeCount(randomRanges)
+        }
+        var integrityIssues: [String] = []
+
         logger.verify("Running duplicate-key check")
         let duplicateRows = try await clickHouse.execute(.select("""
         SELECT broker_source_id, logical_symbol, ts_utc, count()
@@ -31,7 +36,9 @@ public struct VerificationAgent: Sendable {
         LIMIT 20
         """))
         if !duplicateRows.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            logger.warn("Duplicate canonical keys found:\n\(duplicateRows)")
+            let issue = "Duplicate canonical keys found:\n\(duplicateRows)"
+            integrityIssues.append(issue)
+            logger.warn(issue)
         }
 
         logger.verify("Running OHLC invariant check")
@@ -41,7 +48,9 @@ public struct VerificationAgent: Sendable {
         WHERE open_scaled <= 0 OR high_scaled < open_scaled OR high_scaled < close_scaled OR high_scaled < low_scaled OR low_scaled > open_scaled OR low_scaled > close_scaled
         """))
         if invariantCount.trimmingCharacters(in: .whitespacesAndNewlines) != "0" {
-            logger.warn("OHLC invariant violations found: \(invariantCount.trimmingCharacters(in: .whitespacesAndNewlines))")
+            let issue = "OHLC invariant violations found: \(invariantCount.trimmingCharacters(in: .whitespacesAndNewlines))"
+            integrityIssues.append(issue)
+            logger.warn(issue)
         }
 
         logger.verify("Running canonical UTC offset confidence check")
@@ -51,7 +60,13 @@ public struct VerificationAgent: Sendable {
         WHERE offset_confidence != 'verified'
         """))
         if unverifiedCount.trimmingCharacters(in: .whitespacesAndNewlines) != "0" {
-            logger.warn("Canonical rows with non-verified UTC offsets found: \(unverifiedCount.trimmingCharacters(in: .whitespacesAndNewlines))")
+            let issue = "Canonical rows with non-verified UTC offsets found: \(unverifiedCount.trimmingCharacters(in: .whitespacesAndNewlines))"
+            integrityIssues.append(issue)
+            logger.warn(issue)
+        }
+
+        guard integrityIssues.isEmpty else {
+            throw VerificationError.databaseIntegrityFailed(integrityIssues)
         }
 
         guard randomRanges > 0 else {
@@ -111,7 +126,30 @@ public struct VerificationAgent: Sendable {
                 random: &generator
             )
             logger.verify("Random MT5 cross-check \(index)/\(randomRanges): \(range.logicalSymbol.rawValue) \(range.mt5Start.rawValue)..<\(range.mt5EndExclusive.rawValue)")
-            _ = try await verifier.verify(range: range)
+            let outcome = try await verifier.verify(range: range)
+            guard outcome.result.isClean else {
+                throw VerificationError.randomCrossCheckFailed(
+                    symbol: range.logicalSymbol,
+                    mismatchCount: outcome.result.mismatches.count
+                )
+            }
+        }
+    }
+}
+
+public enum VerificationError: Error, CustomStringConvertible, Sendable {
+    case invalidRandomRangeCount(Int)
+    case databaseIntegrityFailed([String])
+    case randomCrossCheckFailed(symbol: LogicalSymbol, mismatchCount: Int)
+
+    public var description: String {
+        switch self {
+        case .invalidRandomRangeCount(let count):
+            return "Random verification range count must not be negative; got \(count)."
+        case .databaseIntegrityFailed(let issues):
+            return "Database integrity checks failed: \(issues.joined(separator: " | "))"
+        case .randomCrossCheckFailed(let symbol, let mismatchCount):
+            return "\(symbol.rawValue): random MT5 cross-check found \(mismatchCount) mismatch(es)."
         }
     }
 }

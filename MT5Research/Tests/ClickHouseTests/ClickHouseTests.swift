@@ -35,6 +35,18 @@ final class ClickHouseTests: XCTestCase {
         XCTAssertThrowsError(try ClickHouseInsertBuilder(database: "db").canonicalRangeDelete([eurusd, usdjpy]))
     }
 
+    func testCanonicalRangeRejectsMixedMT5SymbolForSameLogicalSymbol() throws {
+        let first = try makeBar(mt5: 120, utc: 60, logicalSymbol: "EURUSD", mt5Symbol: "EURUSD")
+        let second = try makeBar(mt5: 180, utc: 120, logicalSymbol: "EURUSD", mt5Symbol: "EURUSD.a")
+        XCTAssertThrowsError(try ClickHouseInsertBuilder(database: "db").canonicalRangeDelete([first, second]))
+    }
+
+    func testCanonicalRangeRejectsMixedDigits() throws {
+        let first = try makeBar(mt5: 120, utc: 60, digits: 5)
+        let second = try makeBar(mt5: 180, utc: 120, digits: 3)
+        XCTAssertThrowsError(try ClickHouseInsertBuilder(database: "db").canonicalBarsInsert([first, second]))
+    }
+
     func testCanonicalRangeDeleteRejectsDuplicateTimestamps() throws {
         let first = try makeBar(mt5: 120, utc: 60)
         let duplicate = try makeBar(mt5: 120, utc: 60)
@@ -58,17 +70,42 @@ final class ClickHouseTests: XCTestCase {
         XCTAssertTrue(query.sql.contains("uniqExact(ts_utc)"))
     }
 
+    func testCanonicalRangeReadbackRowsAreBrokerScopedAndOrdered() throws {
+        let bars = [try makeBar(mt5: 120, utc: 60), try makeBar(mt5: 180, utc: 120)]
+        let query = try ClickHouseInsertBuilder(database: "db").canonicalRangeReadbackRows(bars)
+        XCTAssertTrue(query.sql.contains("SELECT mt5_server_ts_raw, ts_utc, bar_hash"))
+        XCTAssertTrue(query.sql.contains("broker_source_id = 'demo'"))
+        XCTAssertTrue(query.sql.contains("logical_symbol = 'EURUSD'"))
+        XCTAssertTrue(query.sql.contains("ts_utc >= 60"))
+        XCTAssertTrue(query.sql.contains("ts_utc <= 120"))
+        XCTAssertTrue(query.sql.contains("ORDER BY ts_utc ASC"))
+    }
+
+    func testCanonicalConflictCandidateQueryIsBrokerScoped() throws {
+        let bars = [try makeBar(mt5: 120, utc: 60), try makeBar(mt5: 180, utc: 120)]
+        let query = try ClickHouseInsertBuilder(database: "db").canonicalConflictCandidates(bars)
+        XCTAssertTrue(query.sql.contains("SELECT ts_utc, bar_hash, open_scaled, high_scaled, low_scaled, close_scaled"))
+        XCTAssertTrue(query.sql.contains("FROM db.ohlc_m1_canonical"))
+        XCTAssertTrue(query.sql.contains("broker_source_id = 'demo'"))
+        XCTAssertTrue(query.sql.contains("logical_symbol = 'EURUSD'"))
+        XCTAssertTrue(query.sql.contains("ts_utc >= 60"))
+        XCTAssertTrue(query.sql.contains("ts_utc <= 120"))
+    }
+
     private func makeBar(
         mt5: Int64,
         utc: Int64,
         logicalSymbol: String = "EURUSD",
+        mt5Symbol mt5SymbolValue: String? = nil,
+        digits digitsValue: Int = 5,
         offsetConfidence: OffsetConfidence = .verified
     ) throws -> ValidatedBar {
         let broker = try BrokerSourceId("demo")
         let logical = try LogicalSymbol(logicalSymbol)
-        let mt5Symbol = try MT5Symbol(logicalSymbol)
-        let digits = try Digits(5)
-        let open = try PriceScaled.fromDecimalString("1.10000", digits: digits)
+        let mt5Symbol = try MT5Symbol(mt5SymbolValue ?? logicalSymbol)
+        let digits = try Digits(digitsValue)
+        let priceText = digitsValue == 3 ? "1.100" : "1.10000"
+        let open = try PriceScaled.fromDecimalString(priceText, digits: digits)
         return ValidatedBar(
             brokerSourceId: broker,
             logicalSymbol: logical,

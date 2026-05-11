@@ -58,5 +58,17 @@ public struct BacktestEngine: Sendable {
                 throw BacktestError.invalidSeries("UTC timestamps must be strictly increasing")
             }
         }
+        for index in 0..<series.count {
+            let open = series.open[index]
+            let high = series.high[index]
+            let low = series.low[index]
+            let close = series.close[index]
+            guard open > 0, high > 0, low > 0, close > 0 else {
+                throw BacktestError.invalidSeries("OHLC prices must be positive")
+            }
+            guard high >= open, high >= close, high >= low, low <= open, low <= close else {
+                throw BacktestError.invalidSeries("OHLC high/low invariant failed at index \(index)")
+            }
+        }
     }
 }

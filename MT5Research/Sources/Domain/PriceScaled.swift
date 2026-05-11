@@ -1,14 +1,10 @@
 import Foundation
 
-public struct Digits: RawRepresentable, Codable, Hashable, Sendable, Comparable, CustomStringConvertible {
+public struct Digits: Codable, Hashable, Sendable, Comparable, CustomStringConvertible {
     public let rawValue: Int
 
     public init(_ rawValue: Int) throws {
         guard (0...10).contains(rawValue) else { throw DomainError.invalidDigits(rawValue) }
-        self.rawValue = rawValue
-    }
-
-    public init(rawValue: Int) {
         self.rawValue = rawValue
     }
 
@@ -29,18 +25,13 @@ public struct Digits: RawRepresentable, Codable, Hashable, Sendable, Comparable,
     }
 }
 
-public struct PriceScaled: RawRepresentable, Codable, Hashable, Sendable, Comparable, CustomStringConvertible {
+public struct PriceScaled: Codable, Hashable, Sendable, Comparable, CustomStringConvertible {
     public let rawValue: Int64
     public let digits: Digits
 
     public init(rawValue: Int64, digits: Digits) {
         self.rawValue = rawValue
         self.digits = digits
-    }
-
-    public init(rawValue: Int64) {
-        self.rawValue = rawValue
-        self.digits = Digits(rawValue: 0)
     }
 
     public static func fromDecimalString(_ input: String, digits: Digits) throws -> PriceScaled {

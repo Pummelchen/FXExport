@@ -189,6 +189,16 @@ public struct StartCheckRunner: Sendable {
     private func verifyOffsetCoverage(bridge: MT5BridgeClient, offsetMap: BrokerOffsetMap) throws {
         var failures: [String] = []
         for mapping in config.symbols.symbols {
+            let info = try bridge.prepareSymbol(mapping.mt5Symbol)
+            guard info.selected, info.digits == mapping.digits.rawValue else {
+                throw StartCheckError.invalidBridge("\(mapping.mt5Symbol.rawValue) is not prepared with configured digits before offset coverage check")
+            }
+            let status = try bridge.historyStatus(mapping.mt5Symbol)
+            guard status.mt5Symbol == mapping.mt5Symbol.rawValue,
+                  status.synchronized,
+                  status.bars > 0 else {
+                throw StartCheckError.invalidBridge("\(mapping.mt5Symbol.rawValue) M1 history is not synchronized in MT5")
+            }
             let oldest = try bridge.oldestM1BarTime(mapping.mt5Symbol)
             let latest = try bridge.latestClosedM1Bar(mapping.mt5Symbol)
             guard oldest.mt5Symbol == mapping.mt5Symbol.rawValue,
@@ -196,7 +206,7 @@ public struct StartCheckRunner: Sendable {
                 throw StartCheckError.invalidBridge("symbol mismatch while checking offset coverage for \(mapping.logicalSymbol.rawValue)")
             }
             let oldestTime = MT5ServerSecond(rawValue: oldest.mt5ServerTime)
-            let latestExclusive = MT5ServerSecond(rawValue: latest.mt5ServerTime + Timeframe.m1.seconds)
+            let latestExclusive = try Self.addOneMinute(latest.mt5ServerTime)
             let gaps = Self.coverageGaps(in: offsetMap, from: oldestTime, toExclusive: latestExclusive)
             if !gaps.isEmpty {
                 failures.append("\(mapping.logicalSymbol.rawValue): \(gaps.prefix(3).joined(separator: ", "))")
@@ -252,6 +262,14 @@ public struct StartCheckRunner: Sendable {
             gaps.append("\(cursor)..<\(toExclusive.rawValue)")
         }
         return gaps
+    }
+
+    private static func addOneMinute(_ rawTimestamp: Int64) throws -> MT5ServerSecond {
+        let result = rawTimestamp.addingReportingOverflow(Timeframe.m1.seconds)
+        guard !result.overflow else {
+            throw StartCheckError.invalidBridge("timestamp overflow while computing latest closed exclusive bound")
+        }
+        return MT5ServerSecond(rawValue: result.partialValue)
     }
 }
 

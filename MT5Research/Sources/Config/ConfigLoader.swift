@@ -83,8 +83,14 @@ public struct ConfigLoader: Sendable {
         symbols: SymbolConfig
     ) throws {
         guard app.chunkSize > 0 else { throw ConfigError.invalidValue("chunk_size must be greater than zero") }
+        guard app.chunkSize <= 50_000 else {
+            throw ConfigError.invalidValue("chunk_size must be 50,000 or lower to stay within the EA protocol response bound")
+        }
         guard app.liveScanIntervalSeconds > 0 else {
             throw ConfigError.invalidValue("live_scan_interval_seconds must be greater than zero")
+        }
+        guard app.verifierRandomRanges >= 0 else {
+            throw ConfigError.invalidValue("verifier_random_ranges must not be negative")
         }
         try validateSupervisor(app.supervisor)
         guard !clickHouse.database.isEmpty else { throw ConfigError.invalidValue("ClickHouse database is empty") }
@@ -97,8 +103,8 @@ public struct ConfigLoader: Sendable {
         guard Self.isReasonableTimeout(clickHouse.requestTimeoutSeconds) else {
             throw ConfigError.invalidValue("ClickHouse requestTimeoutSeconds must be finite and between 0 and 3600 seconds")
         }
-        guard clickHouse.retryCount >= 0 else {
-            throw ConfigError.invalidValue("ClickHouse retryCount must not be negative")
+        guard (0...10).contains(clickHouse.retryCount) else {
+            throw ConfigError.invalidValue("ClickHouse retryCount must be between 0 and 10")
         }
         guard !mt5Bridge.host.isEmpty else { throw ConfigError.invalidValue("MT5 bridge host is empty") }
         guard Self.isReasonableTimeout(mt5Bridge.connectTimeoutSeconds) else {

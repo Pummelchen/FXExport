@@ -17,7 +17,7 @@ public struct SymbolMetadataDriftAgent: ProductionAgent {
         var warnings: [String] = []
         var failures: [String] = []
         for mapping in context.config.symbols.symbols {
-            let info = try bridge.symbolInfo(mapping.mt5Symbol)
+            let info = try bridge.prepareSymbol(mapping.mt5Symbol)
             if !info.selected {
                 warnings.append("\(mapping.mt5Symbol.rawValue) is not selected")
             }

@@ -130,6 +130,7 @@ public struct LiveUpdateAgent: Sendable {
         let closedBars = try response.rates.map {
             try $0.toClosedM1Bar(logicalSymbol: mapping.logicalSymbol, mt5Symbol: mapping.mt5Symbol, digits: mapping.digits)
         }
+        try validateClosedBarsInRange(closedBars, from: from, toExclusive: toExclusive)
         let now = UtcSecond(rawValue: Int64(Date().timeIntervalSince1970))
         let context = OhlcValidationContext(
             brokerSourceId: config.brokerTime.brokerSourceId,
@@ -145,6 +146,8 @@ public struct LiveUpdateAgent: Sendable {
         let rawInsert = insertBuilder.rawBarsInsert(validated)
         let canonicalDelete = try insertBuilder.canonicalRangeDelete(validated)
         let canonicalInsert = try insertBuilder.canonicalBarsInsert(validated)
+        try await CanonicalConflictRecorder(clickHouse: clickHouse, insertBuilder: insertBuilder)
+            .recordConflictsBeforeCanonicalReplace(validated, detectedAtUtc: now)
         _ = try await clickHouse.execute(rawInsert)
         _ = try await clickHouse.execute(canonicalDelete)
         _ = try await clickHouse.execute(canonicalInsert)
@@ -162,6 +165,15 @@ public struct LiveUpdateAgent: Sendable {
             updatedAtUtc: now
         ))
         logger.ok("\(mapping.logicalSymbol.rawValue): live update inserted \(validated.count) closed M1 bars")
+    }
+
+    private func validateClosedBarsInRange(_ bars: [ClosedM1Bar], from: MT5ServerSecond, toExclusive: MT5ServerSecond) throws {
+        for bar in bars {
+            guard bar.mt5ServerTime.rawValue >= from.rawValue,
+                  bar.mt5ServerTime.rawValue < toExclusive.rawValue else {
+                throw IngestError.invalidBridgeResponse("MT5 bar \(bar.mt5ServerTime.rawValue) is outside requested range \(from.rawValue)..<\(toExclusive.rawValue)")
+            }
+        }
     }
 
     private func loadTerminalIdentity() throws -> BrokerServerIdentity {

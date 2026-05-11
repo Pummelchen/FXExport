@@ -39,6 +39,23 @@ final class BacktestTests: XCTestCase {
         )
         XCTAssertThrowsError(try BacktestEngine().validateSeries(series))
     }
+
+    func testCPUBacktestRejectsInvalidOHLCInvariant() throws {
+        let metadata = BarSeriesMetadata(
+            brokerSourceId: try BrokerSourceId("demo"),
+            logicalSymbol: try LogicalSymbol("EURUSD"),
+            digits: try Digits(5)
+        )
+        let series = try ColumnarOhlcSeries(
+            metadata: metadata,
+            utcTimestamps: [60],
+            open: [100],
+            high: [99],
+            low: [98],
+            close: [100]
+        )
+        XCTAssertThrowsError(try BacktestEngine().validateSeries(series))
+    }
 }
 
 private enum NoopStrategy: BacktestStrategy {

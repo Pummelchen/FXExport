@@ -295,8 +295,16 @@ void HandleRatesRange(const string requestId, const string command, const string
       SendError(requestId, command, "PROTOCOL_ERROR", "GET_RATES_RANGE invalid time range");
       return;
    }
-   if(maxBars <= 0 || maxBars > responseLimit)
-      maxBars = responseLimit;
+   if(maxBars <= 0)
+   {
+      SendError(requestId, command, "PROTOCOL_ERROR", "GET_RATES_RANGE max_bars must be positive");
+      return;
+   }
+   if(maxBars > responseLimit)
+   {
+      SendError(requestId, command, "PROTOCOL_ERROR", "GET_RATES_RANGE max_bars exceeds MaxBarsPerResponse");
+      return;
+   }
 
    MqlRates latest[];
    ArraySetAsSeries(latest, true);
@@ -307,6 +315,9 @@ void HandleRatesRange(const string requestId, const string command, const string
    }
    long latestClosed = (long)latest[0].time;
    long safeToExclusive = (toExclusive < latestClosed + 60 ? toExclusive : latestClosed + 60);
+   long maxToExclusive = fromTs + (long)maxBars * 60;
+   if(maxToExclusive > fromTs && maxToExclusive < safeToExclusive)
+      safeToExclusive = maxToExclusive;
    if(safeToExclusive <= fromTs)
    {
       SendOK(requestId, command, "{\"mt5_symbol\":\"" + JsonEscape(symbol) + "\",\"timeframe\":\"M1\",\"rates\":[]}");

@@ -117,6 +117,52 @@ final class IngestionTests: XCTestCase {
         await XCTAssertThrowsErrorAsync(try await ClickHouseBrokerOffsetStore(client: client, database: "db")
             .loadVerifiedOffsetMap(brokerSourceId: broker, terminalIdentity: identity))
     }
+
+    func testCanonicalInsertVerifierComparesReadbackHashes() async throws {
+        let bar = try validatedBar(mt5: 120, utc: 60)
+        let client = SequenceClickHouseClient(bodies: [
+            "1\t1\t1\n",
+            "120\t60\t\(bar.barHash.description)\n"
+        ])
+
+        try await CanonicalInsertVerifier(
+            clickHouse: client,
+            insertBuilder: ClickHouseInsertBuilder(database: "db")
+        ).verify([bar])
+    }
+
+    func testCanonicalInsertVerifierRejectsHashMismatch() async throws {
+        let bar = try validatedBar(mt5: 120, utc: 60)
+        let client = SequenceClickHouseClient(bodies: [
+            "1\t1\t1\n",
+            "120\t60\tbad-hash\n"
+        ])
+
+        await XCTAssertThrowsErrorAsync(try await CanonicalInsertVerifier(
+            clickHouse: client,
+            insertBuilder: ClickHouseInsertBuilder(database: "db")
+        ).verify([bar]))
+    }
+
+    func testCanonicalConflictRecorderWritesConflictBeforeReplace() async throws {
+        let bar = try validatedBar(mt5: 120, utc: 60)
+        let client = SequenceClickHouseClient(bodies: [
+            "60\toldhash\t109000\t110000\t108000\t109500\n",
+            ""
+        ])
+        try await CanonicalConflictRecorder(
+            clickHouse: client,
+            insertBuilder: ClickHouseInsertBuilder(database: "db")
+        ).recordConflictsBeforeCanonicalReplace([bar], detectedAtUtc: UtcSecond(rawValue: 999))
+
+        let queries = await client.allQueries()
+        XCTAssertEqual(queries.count, 2)
+        XCTAssertTrue(queries[0].contains("FROM db.ohlc_m1_canonical"))
+        XCTAssertTrue(queries[1].contains("INSERT INTO db.ohlc_m1_conflicts"))
+        XCTAssertTrue(queries[1].contains("oldhash"))
+        XCTAssertTrue(queries[1].contains(bar.barHash.description))
+        XCTAssertTrue(queries[1].contains("\t999\tbatch"))
+    }
 }
 
 private func ingestState(oldest: Int64, latest: Int64) throws -> IngestState {
@@ -149,6 +195,54 @@ private actor MockClickHouseClient: ClickHouseClientProtocol {
     func lastQuery() -> String {
         query
     }
+}
+
+private actor SequenceClickHouseClient: ClickHouseClientProtocol {
+    private var bodies: [String]
+    private var queries: [String] = []
+
+    init(bodies: [String]) {
+        self.bodies = bodies
+    }
+
+    func execute(_ query: ClickHouseQuery) async throws -> String {
+        queries.append(query.sql)
+        if bodies.isEmpty {
+            return ""
+        }
+        return bodies.removeFirst()
+    }
+
+    func allQueries() -> [String] {
+        queries
+    }
+}
+
+private func validatedBar(mt5: Int64, utc: Int64) throws -> ValidatedBar {
+    let broker = try BrokerSourceId("demo")
+    let logical = try LogicalSymbol("EURUSD")
+    let mt5Symbol = try MT5Symbol("EURUSD")
+    let digits = try Digits(5)
+    let open = try PriceScaled.fromDecimalString("1.10000", digits: digits)
+    return ValidatedBar(
+        brokerSourceId: broker,
+        logicalSymbol: logical,
+        mt5Symbol: mt5Symbol,
+        timeframe: .m1,
+        mt5ServerTime: MT5ServerSecond(rawValue: mt5),
+        utcTime: UtcSecond(rawValue: utc),
+        serverUtcOffset: OffsetSeconds(rawValue: 60),
+        offsetSource: .manual,
+        offsetConfidence: .verified,
+        open: open,
+        high: open,
+        low: open,
+        close: open,
+        digits: digits,
+        batchId: BatchId(rawValue: "batch"),
+        sourceStatus: .mt5ClosedBar,
+        ingestedAtUtc: UtcSecond(rawValue: 1)
+    )
 }
 
 private func XCTAssertThrowsErrorAsync<T>(

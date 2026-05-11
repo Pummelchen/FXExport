@@ -57,21 +57,25 @@ struct MT5ResearchCLI {
 
             case .symbolCheck:
                 let bridge = try connectBridge(config: config, logger: logger)
+                var failureCount = 0
                 for mapping in config.symbols.symbols {
                     do {
                         let info = try bridge.prepareSymbol(mapping.mt5Symbol)
                         if info.selected && info.digits == mapping.digits.rawValue {
                             logger.ok("\(mapping.logicalSymbol.rawValue): \(mapping.mt5Symbol.rawValue) selected, digits \(info.digits)")
                         } else if info.selected {
+                            failureCount += 1
                             logger.warn("\(mapping.logicalSymbol.rawValue): digits mismatch, config \(mapping.digits.rawValue), MT5 \(info.digits)")
                         } else {
+                            failureCount += 1
                             logger.error("\(mapping.logicalSymbol.rawValue): symbol \(mapping.mt5Symbol.rawValue) not selected in MT5")
                         }
                     } catch {
+                        failureCount += 1
                         logger.error("\(mapping.logicalSymbol.rawValue): \(error)")
                     }
                 }
-                return .success
+                return failureCount == 0 ? .success : .validation
 
             case .backfill:
                 let bridge = try connectBridge(config: config, logger: logger)
@@ -153,14 +157,15 @@ struct MT5ResearchCLI {
                 return await runner.run() ? .success : .verification
 
             case .verify:
+                let randomRangeCount = options.randomRanges ?? config.app.verifierRandomRanges
                 let bridge: MT5BridgeClient?
-                if options.requiresBridge {
+                if options.shouldConnectBridgeForVerify(randomRangeCount: randomRangeCount) {
                     bridge = try connectBridge(config: config, logger: logger)
                 } else {
                     bridge = nil
                 }
                 try await VerificationAgent(config: config, bridge: bridge, clickHouse: clickHouse, logger: logger)
-                    .startupChecks(randomRanges: options.randomRanges ?? config.app.verifierRandomRanges)
+                    .startupChecks(randomRanges: randomRangeCount)
                 return .success
 
             case .repair:
@@ -172,17 +177,29 @@ struct MT5ResearchCLI {
                 return .success
 
             case .backtest:
+                guard let commandConfigPath = options.commandConfigPath else {
+                    throw CLIError.missingValue("--config")
+                }
+                guard FileManager.default.fileExists(atPath: commandConfigPath.path) else {
+                    throw CLIError.invalidValue("--config")
+                }
                 let availability = MetalAvailability()
                 if availability.isAvailable {
                     logger.ok("Metal available: \(availability.deviceName ?? "unknown device")")
                 } else {
                     logger.warn("Metal unavailable; CPU reference engine will be used")
                 }
-                logger.warn("Backtest CLI scaffold is ready; strategy loading is not implemented yet.")
+                logger.warn("Backtest CLI scaffold is ready; strategy loading is not implemented yet. Config: \(commandConfigPath.path)")
                 return .success
 
             case .optimize:
-                logger.warn("Optimize CLI scaffold is ready; CPU reference and optional Metal sweep hooks are in place.")
+                guard let commandConfigPath = options.commandConfigPath else {
+                    throw CLIError.missingValue("--config")
+                }
+                guard FileManager.default.fileExists(atPath: commandConfigPath.path) else {
+                    throw CLIError.invalidValue("--config")
+                }
+                logger.warn("Optimize CLI scaffold is ready; CPU reference and optional Metal sweep hooks are in place. Config: \(commandConfigPath.path)")
                 return .success
 
             case .help:
@@ -208,6 +225,9 @@ struct MT5ResearchCLI {
         } catch let error as TimeMappingError {
             print("[ERROR] Broker UTC offset: \(error.description)")
             return .configuration
+        } catch let error as VerificationError {
+            print("[ERROR] Verification: \(error.description)")
+            return .verification
         } catch let error as MT5BridgeError {
             print("[ERROR] MT5 bridge: \(error.description)")
             return .mt5Bridge
@@ -227,14 +247,16 @@ struct MT5ResearchCLI {
             return try MT5BridgeClient.listen(
                 host: config.mt5Bridge.host,
                 port: config.mt5Bridge.port,
-                timeoutSeconds: config.mt5Bridge.connectTimeoutSeconds
+                connectTimeoutSeconds: config.mt5Bridge.connectTimeoutSeconds,
+                requestTimeoutSeconds: config.mt5Bridge.requestTimeoutSeconds
             )
         case .connect:
             logger.db("Connecting to MT5 bridge at \(config.mt5Bridge.host):\(config.mt5Bridge.port)")
             return try MT5BridgeClient.connect(
                 host: config.mt5Bridge.host,
                 port: config.mt5Bridge.port,
-                timeoutSeconds: config.mt5Bridge.connectTimeoutSeconds
+                connectTimeoutSeconds: config.mt5Bridge.connectTimeoutSeconds,
+                requestTimeoutSeconds: config.mt5Bridge.requestTimeoutSeconds
             )
         }
     }
@@ -381,6 +403,7 @@ struct MT5ResearchCLI {
         Global options:
           --config-dir Config
           --migrations-dir Migrations
+          --config Config/backtest.json   # backtest/optimize only
           --verbose
           --debug
         """)
@@ -413,12 +436,13 @@ struct CLIOptions {
     let repairSymbol: LogicalSymbol?
     let fromUtcDay: UtcSecond?
     let toUtcDay: UtcSecond?
-    let requiresBridge: Bool
+    let noBridgeRequested: Bool
     let runBackfillOnStart: Bool?
     let supervisorCycles: Int?
     let compileEA: Bool
     let bridgeChecks: Bool
     let compileTimeoutSeconds: TimeInterval
+    let commandConfigPath: URL?
 
     init(arguments: [String]) throws {
         guard let first = arguments.first else {
@@ -431,12 +455,13 @@ struct CLIOptions {
             self.repairSymbol = nil
             self.fromUtcDay = nil
             self.toUtcDay = nil
-            self.requiresBridge = false
+            self.noBridgeRequested = false
             self.runBackfillOnStart = nil
             self.supervisorCycles = nil
             self.compileEA = true
             self.bridgeChecks = true
             self.compileTimeoutSeconds = 120
+            self.commandConfigPath = nil
             return
         }
 
@@ -449,13 +474,13 @@ struct CLIOptions {
         var repairSymbol: LogicalSymbol?
         var fromUtcDay: UtcSecond?
         var toUtcDay: UtcSecond?
-        var requiresBridge = command == .verify
         var noBridgeRequested = false
         var runBackfillOnStart: Bool?
         var supervisorCycles: Int?
         var compileEA = true
         var bridgeChecks = true
         var compileTimeoutSeconds: TimeInterval = 120
+        var commandConfigPath: URL?
 
         var index = 1
         while index < arguments.count {
@@ -520,17 +545,18 @@ struct CLIOptions {
             case "--config":
                 index += 1
                 guard index < arguments.count else { throw CLIError.missingValue(arg) }
+                commandConfigPath = URL(fileURLWithPath: arguments[index])
             default:
                 throw CLIError.unknownOption(arg)
             }
             index += 1
         }
 
-        if command == .verify {
-            requiresBridge = !noBridgeRequested && (randomRanges.map { $0 > 0 } ?? true)
-        }
         if command == .repair, let fromUtcDay, let toUtcDay, fromUtcDay.rawValue >= toUtcDay.rawValue {
             throw CLIError.invalidValue("--from/--to")
+        }
+        if commandConfigPath != nil && command != .backtest && command != .optimize {
+            throw CLIError.invalidValue("--config")
         }
 
         self.configDirectory = configDirectory
@@ -541,12 +567,13 @@ struct CLIOptions {
         self.repairSymbol = repairSymbol
         self.fromUtcDay = fromUtcDay
         self.toUtcDay = toUtcDay
-        self.requiresBridge = requiresBridge
+        self.noBridgeRequested = noBridgeRequested
         self.runBackfillOnStart = runBackfillOnStart
         self.supervisorCycles = supervisorCycles
         self.compileEA = compileEA
         self.bridgeChecks = bridgeChecks
         self.compileTimeoutSeconds = compileTimeoutSeconds
+        self.commandConfigPath = commandConfigPath
     }
 
     private static func parseCommand(_ value: String) throws -> Command {
@@ -566,6 +593,10 @@ struct CLIOptions {
         case "help", "--help", "-h": return .help
         default: throw CLIError.unknownCommand(value)
         }
+    }
+
+    func shouldConnectBridgeForVerify(randomRangeCount: Int) -> Bool {
+        !noBridgeRequested && randomRangeCount > 0
     }
 }
 

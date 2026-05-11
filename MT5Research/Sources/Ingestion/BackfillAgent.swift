@@ -123,6 +123,7 @@ public struct BackfillAgent: Sendable {
         guard symbolInfo.digits == mapping.digits.rawValue else {
             throw IngestError.digitsMismatch(symbol: mapping.mt5Symbol.rawValue, expected: mapping.digits.rawValue, actual: symbolInfo.digits)
         }
+        try await ensureHistorySynchronized(mapping: mapping)
 
         logger.info("\(mapping.logicalSymbol.rawValue): discovering oldest available M1 bar")
         let oldestResponse = try bridge.oldestM1BarTime(mapping.mt5Symbol)
@@ -170,6 +171,7 @@ public struct BackfillAgent: Sendable {
             let closedBars = try response.rates.map {
                 try $0.toClosedM1Bar(logicalSymbol: mapping.logicalSymbol, mt5Symbol: mapping.mt5Symbol, digits: mapping.digits)
             }
+            try validateClosedBarsInRange(closedBars, from: range.from, toExclusive: range.toExclusive)
             guard !closedBars.isEmpty else {
                 logger.warn("\(mapping.logicalSymbol.rawValue): no MT5 bars in server-time range \(range.from.rawValue)..<\(range.toExclusive.rawValue); advancing over source gap")
                 cursor = range.toExclusive
@@ -212,6 +214,8 @@ public struct BackfillAgent: Sendable {
         let rawInsert = insertBuilder.rawBarsInsert(bars)
         let canonicalDelete = try insertBuilder.canonicalRangeDelete(bars)
         let canonicalInsert = try insertBuilder.canonicalBarsInsert(bars)
+        try await CanonicalConflictRecorder(clickHouse: clickHouse, insertBuilder: insertBuilder)
+            .recordConflictsBeforeCanonicalReplace(bars, detectedAtUtc: bars[0].ingestedAtUtc)
         _ = try await clickHouse.execute(rawInsert)
         _ = try await clickHouse.execute(canonicalDelete)
         _ = try await clickHouse.execute(canonicalInsert)
@@ -234,6 +238,34 @@ public struct BackfillAgent: Sendable {
         guard response.timeframe == Timeframe.m1.rawValue else {
             throw IngestError.invalidBridgeResponse("expected M1 rates, got \(response.timeframe)")
         }
+    }
+
+    private func validateClosedBarsInRange(_ bars: [ClosedM1Bar], from: MT5ServerSecond, toExclusive: MT5ServerSecond) throws {
+        for bar in bars {
+            guard bar.mt5ServerTime.rawValue >= from.rawValue,
+                  bar.mt5ServerTime.rawValue < toExclusive.rawValue else {
+                throw IngestError.invalidBridgeResponse("MT5 bar \(bar.mt5ServerTime.rawValue) is outside requested range \(from.rawValue)..<\(toExclusive.rawValue)")
+            }
+        }
+    }
+
+    private func ensureHistorySynchronized(mapping: SymbolMapping) async throws {
+        let attempts = 60
+        for attempt in 1...attempts {
+            let status = try bridge.historyStatus(mapping.mt5Symbol)
+            guard status.mt5Symbol == mapping.mt5Symbol.rawValue else {
+                throw IngestError.invalidBridgeResponse("expected history status for \(mapping.mt5Symbol.rawValue), got \(status.mt5Symbol)")
+            }
+            if status.synchronized && status.bars > 0 {
+                logger.ok("\(mapping.logicalSymbol.rawValue): MT5 M1 history synchronized with \(status.bars) local bars")
+                return
+            }
+            if attempt == 1 || attempt % 5 == 0 || attempt == attempts {
+                logger.warn("\(mapping.logicalSymbol.rawValue): waiting for MT5 M1 history synchronization, attempt \(attempt)/\(attempts)")
+            }
+            try await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+        throw IngestError.invalidBridgeResponse("\(mapping.logicalSymbol.rawValue) M1 history did not synchronize in MT5 before oldest/latest discovery")
     }
 
     private func logResumeDecision(_ decision: BackfillResumeDecision, logicalSymbol: LogicalSymbol) {
