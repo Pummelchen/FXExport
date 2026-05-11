@@ -22,7 +22,7 @@ public struct BacktestReadinessRequest: Sendable, Equatable {
         self.utcEndExclusive = utcEndExclusive
     }
 
-    public init(config: BacktestConfigFile) {
+    public init(config: HistoryDataConfigFile) {
         self.init(
             brokerSourceId: config.brokerSourceId,
             logicalSymbol: config.logicalSymbol,

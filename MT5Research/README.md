@@ -1,6 +1,6 @@
 # FXExport
 
-FXExport is a macOS terminal Swift project for exporting MetaTrader 5 historical M1 OHLC data into ClickHouse, verifying it against MT5, repairing canonical ranges only when safe, and preparing the data path for deterministic CPU backtesting and optional Metal acceleration on Apple Silicon.
+FXExport is a macOS terminal Swift project for exporting MetaTrader 5 historical M1 OHLC data into ClickHouse, verifying it against MT5, repairing canonical ranges only when safe, and providing a read-only Swift history-data API for external CPU and Metal backtest applications on Apple Silicon.
 
 The implementation is intentionally defensive:
 
@@ -10,8 +10,9 @@ The implementation is intentionally defensive:
 - Canonical ingestion requires verified broker UTC offset segments.
 - The current open M1 bar must never be ingested.
 - ClickHouse primary keys are not treated as uniqueness constraints.
-- The CPU backtest engine is the correctness reference.
-- Metal acceleration is optional and must be verified against CPU results.
+- FXExport does not run strategies or optimizations internally.
+- External Swift backtest applications should read verified canonical data through `FXExportHistoryData`.
+- Optional Metal support is limited to read-only OHLC buffer preparation; strategy kernels belong in the external app.
 
 ## Architecture
 
@@ -29,7 +30,10 @@ The system has two parts:
    - Listens for or connects to the MT5 bridge.
    - Validates and converts MT5 data.
    - Writes raw audit rows and canonical OHLC rows to ClickHouse.
-   - Runs backfill, live updates, MT5 cross-check verification, canonical-only repair, and backtest scaffolds.
+   - Runs backfill, live updates, MT5 cross-check verification, canonical-only repair, and history-data readiness checks.
+   - Exposes SwiftPM library products:
+     - `FXExportHistoryData`: read-only canonical M1 OHLC loading from ClickHouse into columnar arrays.
+     - `FXExportMetalData`: optional Metal buffer preparation for those arrays on Apple Silicon.
 
 Important MT5 socket note: standard MQL5 sockets are client-oriented. The sample EA therefore connects to the Swift listener. The Swift transport also supports outbound client mode for future bridge variants.
 
@@ -137,6 +141,7 @@ cp ConfigSamples/clickhouse.sample.json Config/clickhouse.json
 cp ConfigSamples/mt5_bridge.sample.json Config/mt5_bridge.json
 cp ConfigSamples/broker_time.sample.json Config/broker_time.json
 cp ConfigSamples/symbols.sample.json Config/symbols.json
+cp ConfigSamples/history_data.sample.json Config/history_data.json
 ```
 
 Edit every file before production use.
@@ -273,7 +278,7 @@ If MT5 exposes older historical bars after the first partial run, backfill now d
 
 If the checkpoint references a different configured MT5 symbol, or the checkpoint is newer than MT5's latest closed bar, ingestion stops for that symbol. Treat that as a broker/source identity problem and inspect config, MT5 account/server, and `broker_time_offsets` before continuing.
 
-Raw audit rows are append-only. A crash/retry may leave repeated raw audit attempts with the same deterministic `batch_id`, but canonical backtesting data is rewritten and verified before the checkpoint moves.
+Raw audit rows are append-only. A crash/retry may leave repeated raw audit attempts with the same deterministic `batch_id`, but canonical history data is rewritten and verified before the checkpoint moves.
 
 ## MT5 EA Setup
 
@@ -312,9 +317,7 @@ swift run FXExport failure-guide
 swift run FXExport verify
 swift run FXExport verify --random-ranges 20
 swift run FXExport repair --symbol EURUSD --from 2020-01-01 --to 2020-02-01
-swift run FXExport export-cache --symbol EURUSD --from 2020-01-01 --to 2025-01-01
-swift run FXExport backtest --config Config/backtest.json
-swift run FXExport optimize --config Config/optimize.json
+swift run FXExport data-check --config Config/history_data.json
 ```
 
 Global options:
@@ -344,18 +347,22 @@ Use `--skip-bridge` only for the early preflight before the EA is attached. A pr
 
 `repair --from` and `--to` are UTC dates in `YYYY-MM-DD` format. Repair first verifies the requested range against MT5, repairs canonical rows only when the mismatch is unambiguous and UTC mapping is verified, writes `repair_log`, and then verifies the range again. Raw audit rows are never deleted.
 
-## Backtest Readiness Gate
+`data-check` runs the same safety gate external backtest applications should use, then reads verified canonical M1 bars directly from ClickHouse into a columnar `ColumnarOhlcSeries`. If `"use_metal": true` is set in the config, it also prepares read-only Metal buffers from the same arrays. No local cache is written.
 
-`backtest` and `optimize` now run a database safety gate before any strategy scaffold is allowed to execute. The gate blocks when:
+`export-cache`, `backtest`, and `optimize` intentionally fail closed. FXExport is the history-data provider; strategy execution, parameter sweeps, durable optimizer jobs, and result persistence belong in the external Swift backtest application.
+
+## History Data Readiness Gate
+
+`data-check` and external backtest applications should run the database safety gate before loading canonical bars. The gate blocks when:
 
 - Any configured symbol has no checkpoint, a non-`live` ingest status, or a checkpoint mapped to a different configured MT5 symbol.
-- The requested backtest end is beyond the target symbol's latest verified checkpoint.
+- The requested data end is beyond the target symbol's latest verified checkpoint.
 - Canonical rows contain duplicate UTC identities, OHLC invariant failures, or non-verified offset confidence.
 - Any latest verification range result is not `clean`, or any latest repair range outcome is `failed`.
 - A required safety agent has a current `warning`/`failed` state.
 - Required safety agents have never reported OK, or their last OK is stale.
 
-Required fresh OK agent state for backtesting:
+Required fresh OK agent state before history data is considered safe for external backtests:
 
 | Agent | Default max OK age | Purpose |
 | --- | ---: | --- |
@@ -365,7 +372,43 @@ Required fresh OK agent state for backtesting:
 | `database_verifier_repairer` | max(7200s, 2x verifier interval) | Confirms DB integrity and MT5 random checks are clean according to config. |
 | `checkpoint_gap_auditor` | max(900s, 3x checkpoint audit interval) | Confirms every configured symbol has a live checkpoint, checkpoint MT5 symbols still match config, checkpoint/canonical rows are consistent, and live lag is acceptable. |
 
-This means a freshly loaded database is not considered backtest-ready until the supervisor has run the safety agents successfully. If a first import was interrupted, `ingest_state.status` remains `backfilling`, so backtests stay blocked until backfill is rerun and all configured symbols reach `live`.
+This means a freshly loaded database is not considered safe for external backtests until the supervisor has run the safety agents successfully. If a first import was interrupted, `ingest_state.status` remains `backfilling`, so history-data reads for backtesting stay blocked until backfill is rerun and all configured symbols reach `live`.
+
+## Swift History Data API
+
+External Swift packages can depend on FXExport and import the history-data module:
+
+```swift
+import BacktestCore
+import ClickHouse
+import Domain
+
+let provider = ClickHouseHistoricalOhlcDataProvider(
+    client: clickHouseClient,
+    database: "fxexport"
+)
+let request = try HistoricalOhlcRequest(
+    brokerSourceId: try BrokerSourceId("icmarkets-sc-mt5-4"),
+    logicalSymbol: try LogicalSymbol("EURUSD"),
+    utcStartInclusive: UtcSecond(rawValue: 1_577_836_800),
+    utcEndExclusive: UtcSecond(rawValue: 1_735_689_600),
+    expectedDigits: try Digits(5),
+    maximumRows: 5_000_000
+)
+let series = try await provider.loadM1Ohlc(request)
+```
+
+The provider is read-only. It queries `ohlc_m1_canonical`, rejects non-M1 rows, non-verified UTC offsets, non-closed-bar source statuses, duplicate or unsorted UTC timestamps, mixed digits, invalid OHLC invariants, and over-large requests. It does not create local caches because verifier/repair agents may legitimately rewrite canonical ranges after MT5 source-of-truth checks. Let ClickHouse serve the current canonical state; add caches only after a coherent invalidation strategy exists.
+
+For Metal-capable external apps:
+
+```swift
+import MetalAccel
+
+let buffers = try MetalBufferManager().makeReadOnlyBuffers(series: series)
+```
+
+The Metal helper only uploads verified OHLC columns into read-only shared buffers. It does not run strategy kernels or claim GPU results are correct.
 
 ## Production Supervisor Agents
 
@@ -415,22 +458,23 @@ Implemented:
 - Operational failure guide command with action-oriented recovery advice for unattended operation.
 - Alerting agent checks for failed/stale safety agents, MT5 bridge outage state, ClickHouse/local disk pressure, unresolved verification mismatches, and failed repair outcomes. Heavy canonical duplicate/OHLC/offset scans stay owned by the verifier agent instead of running every alert cycle.
 - Resilient live updater that reconnects the MT5 bridge and retries local ClickHouse recovery with backoff without advancing checkpoints on failed batches.
-- Backtest/optimize readiness gate that blocks on incomplete first-run ingest, damaged canonical data, unresolved verification/repair state, or stale safety-agent OK state.
+- History-data readiness gate that blocks on incomplete first-run ingest, damaged canonical data, unresolved verification/repair state, or stale safety-agent OK state.
 - `startcheck` go-live gate with ClickHouse checks, MetaEditor EA compile, MT5 terminal identity validation, verified broker UTC offset coverage, and `GET_RATES_FROM_POSITION` smoke testing.
 - Startup verifier checks plus random historical MT5-vs-ClickHouse range comparison.
 - Canonical-only repair command with verify -> repair -> reverify flow.
-- CPU backtest scaffold using columnar arrays.
-- Optional Metal availability scaffold.
+- Read-only Swift history-data API using validated columnar arrays.
+- Optional Metal availability and OHLC buffer-preparation utility.
 - MQL5 EA bridge skeleton.
-- XCTest coverage for critical domain/protocol/validation/time/checkpoint/backtest logic.
+- XCTest coverage for critical domain/protocol/validation/time/checkpoint/history-data logic.
 
-Still intentionally scaffolded:
+Intentionally not implemented in FXExport:
 
-- Export-cache command.
-- Strategy loading and real EA-clone backtest logic.
-- Metal compute pipeline execution.
+- Local cache export. Caches can become stale after verifier/repair activity.
+- Strategy execution and EA-clone backtesting.
+- Long-running optimizer jobs.
+- Metal strategy kernels or parameter-sweep execution.
 
-Those TODOs are isolated and actionable; they are not hidden in hot-path validation.
+Those responsibilities belong in external Swift research applications that consume FXExport's read-only data API.
 
 ## Data Integrity Rules
 
@@ -447,4 +491,4 @@ This project must preserve these invariants:
 - Never silently ignore ClickHouse response-body errors.
 - Never hide protocol errors.
 - Never claim a range is verified unless MT5 comparison succeeded.
-- Never make GPU results authoritative without CPU verification.
+- Never let a stale cache override repaired canonical ClickHouse data.

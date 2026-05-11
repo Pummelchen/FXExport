@@ -1,0 +1,252 @@
+import ClickHouse
+import Domain
+import Foundation
+
+public struct HistoricalOhlcRequest: Sendable, Equatable {
+    public let brokerSourceId: BrokerSourceId
+    public let logicalSymbol: LogicalSymbol
+    public let utcStartInclusive: UtcSecond
+    public let utcEndExclusive: UtcSecond
+    public let expectedDigits: Digits?
+    public let maximumRows: Int?
+    public let allowEmpty: Bool
+
+    public init(
+        brokerSourceId: BrokerSourceId,
+        logicalSymbol: LogicalSymbol,
+        utcStartInclusive: UtcSecond,
+        utcEndExclusive: UtcSecond,
+        expectedDigits: Digits? = nil,
+        maximumRows: Int? = nil,
+        allowEmpty: Bool = false
+    ) throws {
+        guard utcStartInclusive.rawValue < utcEndExclusive.rawValue else {
+            throw HistoryDataError.invalidRequest("UTC start must be before UTC end.")
+        }
+        guard utcStartInclusive.isMinuteAligned, utcEndExclusive.isMinuteAligned else {
+            throw HistoryDataError.invalidRequest("UTC range boundaries must be minute-aligned.")
+        }
+        if let maximumRows, maximumRows <= 0 {
+            throw HistoryDataError.invalidRequest("maximumRows must be positive when supplied.")
+        }
+        self.brokerSourceId = brokerSourceId
+        self.logicalSymbol = logicalSymbol
+        self.utcStartInclusive = utcStartInclusive
+        self.utcEndExclusive = utcEndExclusive
+        self.expectedDigits = expectedDigits
+        self.maximumRows = maximumRows
+        self.allowEmpty = allowEmpty
+    }
+}
+
+public protocol HistoricalOhlcDataProviding: Sendable {
+    func loadM1Ohlc(_ request: HistoricalOhlcRequest) async throws -> ColumnarOhlcSeries
+}
+
+public struct ClickHouseHistoricalOhlcDataProvider: HistoricalOhlcDataProviding {
+    private let client: ClickHouseClientProtocol
+    private let database: String
+    private let defaultMaximumRows: Int
+
+    public init(
+        client: ClickHouseClientProtocol,
+        database: String,
+        defaultMaximumRows: Int = 5_000_000
+    ) {
+        self.client = client
+        self.database = database
+        self.defaultMaximumRows = defaultMaximumRows
+    }
+
+    public func loadM1Ohlc(_ request: HistoricalOhlcRequest) async throws -> ColumnarOhlcSeries {
+        let limit = request.maximumRows ?? defaultMaximumRows
+        guard limit > 0 else {
+            throw HistoryDataError.invalidRequest("maximumRows must be positive.")
+        }
+        guard limit < Int.max else {
+            throw HistoryDataError.invalidRequest("maximumRows is too large.")
+        }
+        let body = try await client.execute(.select(try sql(for: request, limit: limit + 1)))
+        let rows = try parseRows(body)
+        guard rows.count <= limit else {
+            throw HistoryDataError.rowLimitExceeded(limit: limit)
+        }
+        guard !rows.isEmpty else {
+            if request.allowEmpty, let expectedDigits = request.expectedDigits {
+                return try ColumnarOhlcSeries(
+                    metadata: BarSeriesMetadata(
+                        brokerSourceId: request.brokerSourceId,
+                        logicalSymbol: request.logicalSymbol,
+                        digits: expectedDigits,
+                        requestedUtcStart: request.utcStartInclusive,
+                        requestedUtcEndExclusive: request.utcEndExclusive
+                    ),
+                    utcTimestamps: [],
+                    open: [],
+                    high: [],
+                    low: [],
+                    close: []
+                )
+            }
+            throw HistoryDataError.emptyResult(request.logicalSymbol, request.utcStartInclusive, request.utcEndExclusive)
+        }
+
+        let digits = try validatedDigits(rows, expected: request.expectedDigits)
+        let timestamps = rows.map(\.utcTime.rawValue)
+        let metadata = BarSeriesMetadata(
+            brokerSourceId: request.brokerSourceId,
+            logicalSymbol: request.logicalSymbol,
+            digits: digits,
+            requestedUtcStart: request.utcStartInclusive,
+            requestedUtcEndExclusive: request.utcEndExclusive,
+            firstUtc: rows.first?.utcTime,
+            lastUtc: rows.last?.utcTime
+        )
+        return try ColumnarOhlcSeries(
+            metadata: metadata,
+            utcTimestamps: timestamps,
+            open: rows.map(\.open),
+            high: rows.map(\.high),
+            low: rows.map(\.low),
+            close: rows.map(\.close)
+        )
+    }
+
+    private func sql(for request: HistoricalOhlcRequest, limit: Int) throws -> String {
+        let database = try Self.sqlIdentifier(database)
+        return """
+        SELECT ts_utc, mt5_server_ts_raw, open_scaled, high_scaled, low_scaled, close_scaled,
+               digits, timeframe, offset_confidence, source_status, bar_hash
+        FROM \(database).ohlc_m1_canonical
+        WHERE broker_source_id = '\(Self.sqlLiteral(request.brokerSourceId.rawValue))'
+          AND logical_symbol = '\(Self.sqlLiteral(request.logicalSymbol.rawValue))'
+          AND ts_utc >= \(request.utcStartInclusive.rawValue)
+          AND ts_utc < \(request.utcEndExclusive.rawValue)
+        ORDER BY ts_utc ASC, ingested_at_utc ASC
+        LIMIT \(limit)
+        FORMAT TabSeparated
+        """
+    }
+
+    private func parseRows(_ body: String) throws -> [CanonicalOhlcRow] {
+        try body
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map { try parseRow(String($0)) }
+    }
+
+    private func parseRow(_ row: String) throws -> CanonicalOhlcRow {
+        let fields = row.split(separator: "\t", omittingEmptySubsequences: false).map { Self.unescapeTabSeparated(String($0)) }
+        guard fields.count == 11,
+              let tsUtc = Int64(fields[0]),
+              let mt5ServerTime = Int64(fields[1]),
+              let open = Int64(fields[2]),
+              let high = Int64(fields[3]),
+              let low = Int64(fields[4]),
+              let close = Int64(fields[5]),
+              let digitsRaw = Int(fields[6]) else {
+            throw HistoryDataError.invalidCanonicalRow(row)
+        }
+        guard let timeframe = Timeframe(rawValue: fields[7]) else {
+            throw HistoryDataError.invalidCanonicalRow("unknown timeframe '\(fields[7])'")
+        }
+        guard let confidence = OffsetConfidence(rawValue: fields[8]) else {
+            throw HistoryDataError.invalidCanonicalRow("unknown offset confidence '\(fields[8])'")
+        }
+        guard let sourceStatus = SourceStatus(rawValue: fields[9]) else {
+            throw HistoryDataError.invalidCanonicalRow("unknown source status '\(fields[9])'")
+        }
+        let barHash = fields[10]
+        guard !barHash.isEmpty else {
+            throw HistoryDataError.invalidCanonicalRow("empty bar hash")
+        }
+        guard timeframe == .m1 else {
+            throw HistoryDataError.invalidCanonicalRow("canonical data API only accepts M1 rows")
+        }
+        let serverTime = MT5ServerSecond(rawValue: mt5ServerTime)
+        guard serverTime.isMinuteAligned else {
+            throw HistoryDataError.invalidCanonicalRow("MT5 server timestamp \(mt5ServerTime) is not minute-aligned")
+        }
+        let utcTime = UtcSecond(rawValue: tsUtc)
+        guard utcTime.isMinuteAligned else {
+            throw HistoryDataError.invalidCanonicalRow("UTC timestamp \(tsUtc) is not minute-aligned")
+        }
+        guard confidence == .verified else {
+            throw HistoryDataError.invalidCanonicalRow("canonical row has \(confidence.rawValue) UTC offset confidence")
+        }
+        guard sourceStatus == .mt5ClosedBar else {
+            throw HistoryDataError.invalidCanonicalRow("canonical row source_status is \(sourceStatus.rawValue), expected \(SourceStatus.mt5ClosedBar.rawValue)")
+        }
+        return CanonicalOhlcRow(
+            utcTime: utcTime,
+            mt5ServerTime: serverTime,
+            open: open,
+            high: high,
+            low: low,
+            close: close,
+            digits: try Digits(digitsRaw)
+        )
+    }
+
+    private func validatedDigits(_ rows: [CanonicalOhlcRow], expected: Digits?) throws -> Digits {
+        guard let first = rows.first else {
+            if let expected { return expected }
+            throw HistoryDataError.invalidCanonicalRow("cannot infer digits from an empty result")
+        }
+        for row in rows where row.digits != first.digits {
+            throw HistoryDataError.invalidCanonicalRow("mixed digits in canonical result")
+        }
+        if let expected, expected != first.digits {
+            throw HistoryDataError.invalidCanonicalRow("digits mismatch: expected \(expected.rawValue), got \(first.digits.rawValue)")
+        }
+        return first.digits
+    }
+
+    private static func sqlLiteral(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
+    }
+
+    private static func sqlIdentifier(_ value: String) throws -> String {
+        guard !value.isEmpty,
+              value.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" }) else {
+            throw HistoryDataError.invalidRequest("ClickHouse database name must contain only letters, numbers, or underscore.")
+        }
+        return value
+    }
+
+    private static func unescapeTabSeparated(_ value: String) -> String {
+        var result = ""
+        var escaping = false
+        for character in value {
+            if escaping {
+                switch character {
+                case "t": result.append("\t")
+                case "n": result.append("\n")
+                case "r": result.append("\r")
+                case "\\": result.append("\\")
+                default: result.append(character)
+                }
+                escaping = false
+            } else if character == "\\" {
+                escaping = true
+            } else {
+                result.append(character)
+            }
+        }
+        if escaping {
+            result.append("\\")
+        }
+        return result
+    }
+}
+
+private struct CanonicalOhlcRow: Sendable {
+    let utcTime: UtcSecond
+    let mt5ServerTime: MT5ServerSecond
+    let open: Int64
+    let high: Int64
+    let low: Int64
+    let close: Int64
+    let digits: Digits
+}

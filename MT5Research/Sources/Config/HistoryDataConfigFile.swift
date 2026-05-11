@@ -1,7 +1,7 @@
 import Domain
 import Foundation
 
-public struct BacktestConfigFile: Codable, Sendable {
+public struct HistoryDataConfigFile: Codable, Sendable {
     public let brokerSourceId: BrokerSourceId
     public let logicalSymbol: LogicalSymbol
     public let fromUtc: UtcSecond
@@ -30,3 +30,6 @@ public struct BacktestConfigFile: Codable, Sendable {
         self.useMetal = useMetal
     }
 }
+
+@available(*, deprecated, renamed: "HistoryDataConfigFile")
+public typealias BacktestConfigFile = HistoryDataConfigFile

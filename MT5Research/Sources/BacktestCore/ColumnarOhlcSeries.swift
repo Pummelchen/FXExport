@@ -15,7 +15,7 @@ public struct ColumnarOhlcSeries: BarSeries, Sendable {
     public init(metadata: BarSeriesMetadata, utcTimestamps: [Int64], open: [Int64], high: [Int64], low: [Int64], close: [Int64]) throws {
         let count = utcTimestamps.count
         guard open.count == count, high.count == count, low.count == count, close.count == count else {
-            throw BacktestError.invalidSeries("Column arrays must have equal length")
+            throw HistoryDataError.invalidSeries("Column arrays must have equal length.")
         }
         self.metadata = metadata
         self.utcTimestamps = utcTimestamps
@@ -23,5 +23,6 @@ public struct ColumnarOhlcSeries: BarSeries, Sendable {
         self.high = high
         self.low = low
         self.close = close
+        try OhlcSeriesValidator().validate(self)
     }
 }

@@ -30,6 +30,9 @@ struct MT5ResearchCLI {
                 print(OperationalFailureGuide.catalogText())
                 return .success
             }
+            if let reason = options.command.unavailableReason {
+                throw CLIError.commandUnavailable(reason)
+            }
 
             let loader = ConfigLoader()
             let config = try loader.loadBundle(configDirectory: options.configDirectory)
@@ -193,42 +196,48 @@ struct MT5ResearchCLI {
                 return .success
 
             case .exportCache:
-                logger.warn("Export-cache CLI is scaffolded. It will read canonical bars in bulk and write a typed local cache format.")
+                throw CLIError.commandUnavailable(options.command.unavailableReason ?? "Command unavailable.")
+
+            case .dataCheck:
+                guard let commandConfigPath = options.commandConfigPath else {
+                    throw CLIError.missingValue("--config")
+                }
+                guard FileManager.default.fileExists(atPath: commandConfigPath.path) else {
+                    throw CLIError.invalidValue("--config")
+                }
+                let historyConfig = try loadHistoryDataConfig(commandConfigPath)
+                try await BacktestReadinessGate(config: config, clickHouse: clickHouse)
+                    .assertReady(BacktestReadinessRequest(config: historyConfig))
+                logger.ok("History data-readiness gate passed for \(historyConfig.logicalSymbol.rawValue)")
+                let request = try makeHistoryDataRequest(historyConfig, config: config)
+                let series = try await ClickHouseHistoricalOhlcDataProvider(
+                    client: clickHouse,
+                    database: config.clickHouse.database
+                ).loadM1Ohlc(request)
+                let first = series.metadata.firstUtc?.rawValue.description ?? "n/a"
+                let last = series.metadata.lastUtc?.rawValue.description ?? "n/a"
+                logger.ok("\(historyConfig.logicalSymbol.rawValue): loaded \(series.count) verified canonical M1 bars from ClickHouse")
+                logger.info("\(historyConfig.logicalSymbol.rawValue): UTC range loaded first=\(first), last=\(last), digits=\(series.metadata.digits.rawValue)")
+                if historyConfig.useMetal {
+                    #if canImport(Metal)
+                    let availability = MetalAvailability()
+                    guard availability.isAvailable else {
+                        logger.warn("Metal data buffers requested, but Metal is unavailable on this machine")
+                        return .success
+                    }
+                    let buffers = try MetalBufferManager().makeReadOnlyBuffers(series: series)
+                    logger.ok("Metal read-only OHLC buffers prepared on \(buffers.deviceName) with \(buffers.count) rows")
+                    #else
+                    logger.warn("Metal data buffers requested, but this Swift toolchain cannot import Metal")
+                    #endif
+                }
                 return .success
 
             case .backtest:
-                guard let commandConfigPath = options.commandConfigPath else {
-                    throw CLIError.missingValue("--config")
-                }
-                guard FileManager.default.fileExists(atPath: commandConfigPath.path) else {
-                    throw CLIError.invalidValue("--config")
-                }
-                let backtestConfig = try loadBacktestConfig(commandConfigPath)
-                try await BacktestReadinessGate(config: config, clickHouse: clickHouse)
-                    .assertReady(BacktestReadinessRequest(config: backtestConfig))
-                logger.ok("Backtest data-readiness gate passed for \(backtestConfig.logicalSymbol.rawValue)")
-                let availability = MetalAvailability()
-                if availability.isAvailable {
-                    logger.ok("Metal available: \(availability.deviceName ?? "unknown device")")
-                } else {
-                    logger.warn("Metal unavailable; CPU reference engine will be used")
-                }
-                logger.warn("Backtest CLI scaffold is ready; strategy loading is not implemented yet. Config: \(commandConfigPath.path)")
-                return .success
+                throw CLIError.commandUnavailable(options.command.unavailableReason ?? "Command unavailable.")
 
             case .optimize:
-                guard let commandConfigPath = options.commandConfigPath else {
-                    throw CLIError.missingValue("--config")
-                }
-                guard FileManager.default.fileExists(atPath: commandConfigPath.path) else {
-                    throw CLIError.invalidValue("--config")
-                }
-                let backtestConfig = try loadBacktestConfig(commandConfigPath)
-                try await BacktestReadinessGate(config: config, clickHouse: clickHouse)
-                    .assertReady(BacktestReadinessRequest(config: backtestConfig))
-                logger.ok("Optimization data-readiness gate passed for \(backtestConfig.logicalSymbol.rawValue)")
-                logger.warn("Optimize CLI scaffold is ready; CPU reference and optional Metal sweep hooks are in place. Config: \(commandConfigPath.path)")
-                return .success
+                throw CLIError.commandUnavailable(options.command.unavailableReason ?? "Command unavailable.")
 
             case .help:
                 printUsage()
@@ -263,9 +272,14 @@ struct MT5ResearchCLI {
             activeLogger?.alert("Runtime lock unavailable", details: error.description)
             return .configuration
         } catch let error as BacktestReadinessError {
-            print("[ERROR] Backtest readiness blocked")
+            print("[ERROR] History data readiness blocked")
             print(OperationalFailureGuide.advice(for: error).formatted)
-            activeLogger?.alert("Backtest readiness blocked", details: error.description)
+            activeLogger?.alert("History data readiness blocked", details: error.description)
+            return .backtest
+        } catch let error as HistoryDataError {
+            print("[ERROR] History data load failed")
+            print(error.description)
+            activeLogger?.alert("History data load failed", details: error.description)
             return .backtest
         } catch let error as TimeMappingError {
             print("[ERROR] Broker UTC offset problem")
@@ -389,13 +403,29 @@ struct MT5ResearchCLI {
         return try argument.split(separator: ",").map { try LogicalSymbol(String($0)) }
     }
 
-    private static func loadBacktestConfig(_ url: URL) throws -> BacktestConfigFile {
+    private static func loadHistoryDataConfig(_ url: URL) throws -> HistoryDataConfigFile {
         do {
             let data = try Data(contentsOf: url)
-            return try JSONDecoder().decode(BacktestConfigFile.self, from: data)
+            return try JSONDecoder().decode(HistoryDataConfigFile.self, from: data)
         } catch {
             throw ConfigError.invalidFile(url, error.localizedDescription)
         }
+    }
+
+    private static func makeHistoryDataRequest(
+        _ historyConfig: HistoryDataConfigFile,
+        config: ConfigBundle
+    ) throws -> HistoricalOhlcRequest {
+        guard let mapping = config.symbols.mapping(for: historyConfig.logicalSymbol) else {
+            throw CLIError.invalidValue("logical_symbol")
+        }
+        return try HistoricalOhlcRequest(
+            brokerSourceId: historyConfig.brokerSourceId,
+            logicalSymbol: historyConfig.logicalSymbol,
+            utcStartInclusive: historyConfig.fromUtc,
+            utcEndExclusive: historyConfig.toUtc,
+            expectedDigits: mapping.digits
+        )
     }
 
     private static func runLiveWithRecovery(
@@ -624,14 +654,12 @@ struct MT5ResearchCLI {
           verify
           verify --random-ranges 20
           repair --symbol EURUSD --from 2020-01-01 --to 2020-02-01
-          export-cache --symbol EURUSD --from 2020-01-01 --to 2025-01-01
-          backtest --config Config/backtest.json
-          optimize --config Config/optimize.json
+          data-check --config Config/history_data.json
 
         Global options:
           --config-dir Config
           --migrations-dir Migrations
-          --config Config/backtest.json   # backtest/optimize only
+          --config Config/history_data.json   # data-check only
           --verbose
           --debug
         """)
@@ -650,6 +678,7 @@ enum Command: Equatable {
     case verify
     case repair
     case exportCache
+    case dataCheck
     case backtest
     case optimize
     case help
@@ -658,10 +687,23 @@ enum Command: Equatable {
 private extension Command {
     var requiresClickHouseStartupCheck: Bool {
         switch self {
-        case .help, .failureGuide, .symbolCheck:
+        case .help, .failureGuide, .symbolCheck, .exportCache, .backtest, .optimize:
             return false
-        case .migrate, .bridgeCheck, .backfill, .live, .supervise, .startcheck, .verify, .repair, .exportCache, .backtest, .optimize:
+        case .migrate, .bridgeCheck, .backfill, .live, .supervise, .startcheck, .verify, .repair, .dataCheck:
             return true
+        }
+    }
+
+    var unavailableReason: String? {
+        switch self {
+        case .exportCache:
+            return "export-cache is intentionally disabled. FXExport reads verified canonical bars directly from ClickHouse so stale local caches cannot survive verifier repairs."
+        case .backtest:
+            return "backtest has been removed from FXExport. Use data-check to verify/load historical data, then run strategies in an external Swift app through the FXExportHistoryData API."
+        case .optimize:
+            return "optimize has been removed from FXExport. Long-running optimization belongs in an external Swift app with its own durable job model; FXExport only serves verified OHLC data."
+        case .migrate, .bridgeCheck, .symbolCheck, .backfill, .live, .supervise, .startcheck, .failureGuide, .verify, .repair, .dataCheck, .help:
+            return nil
         }
     }
 }
@@ -860,7 +902,7 @@ struct CLIOptions {
         if command == .repair, let fromUtcDay, let toUtcDay, fromUtcDay.rawValue >= toUtcDay.rawValue {
             throw CLIError.invalidValue("--from/--to")
         }
-        if commandConfigPath != nil && command != .backtest && command != .optimize {
+        if commandConfigPath != nil && command != .dataCheck && command != .backtest && command != .optimize {
             throw CLIError.invalidValue("--config")
         }
 
@@ -894,6 +936,7 @@ struct CLIOptions {
         case "verify": return .verify
         case "repair": return .repair
         case "export-cache": return .exportCache
+        case "data-check": return .dataCheck
         case "backtest": return .backtest
         case "optimize": return .optimize
         case "help", "--help", "-h": return .help
@@ -911,6 +954,7 @@ enum CLIError: Error, CustomStringConvertible {
     case unknownOption(String)
     case missingValue(String)
     case invalidValue(String)
+    case commandUnavailable(String)
 
     var description: String {
         switch self {
@@ -922,6 +966,8 @@ enum CLIError: Error, CustomStringConvertible {
             return "Missing value for \(option)."
         case .invalidValue(let option):
             return "Invalid value for \(option)."
+        case .commandUnavailable(let reason):
+            return reason
         }
     }
 }

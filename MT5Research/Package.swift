@@ -7,6 +7,8 @@ let package = Package(
         .macOS(.v13)
     ],
     products: [
+        .library(name: "FXExportHistoryData", targets: ["BacktestCore"]),
+        .library(name: "FXExportMetalData", targets: ["MetalAccel"]),
         .executable(name: "FXExport", targets: ["MT5ResearchCLI"])
     ],
     targets: [
@@ -34,7 +36,7 @@ let package = Package(
         .testTarget(name: "IngestionTests", dependencies: ["Domain", "Ingestion", "ClickHouse", "MT5Bridge", "TimeMapping"]),
         .testTarget(name: "VerificationTests", dependencies: ["Domain", "Verification", "TimeMapping"]),
         .testTarget(name: "OperationsTests", dependencies: ["Domain", "Config", "ClickHouse", "TimeMapping", "Operations"]),
-        .testTarget(name: "BacktestTests", dependencies: ["Domain", "BacktestCore"])
+        .testTarget(name: "BacktestTests", dependencies: ["Domain", "ClickHouse", "BacktestCore"])
     ],
     swiftLanguageModes: [.v6]
 )
