@@ -201,9 +201,9 @@ public struct AlertingAgent: ProductionAgent {
 
     private static func isMT5SensitiveAgent(_ agent: ProductionAgentKind) -> Bool {
         switch agent {
-        case .healthMonitor, .utcTimeAuthority, .symbolMetadataDrift, .historyImporter, .liveM1Updater, .databaseVerifierRepairer:
+        case .healthMonitor, .bridgeVersionGuard, .utcTimeAuthority, .symbolMetadataDrift, .sourceHistoryDrift, .historyImporter, .liveM1Updater, .databaseVerifierRepairer:
             return true
-        case .supervisorCoordinator, .checkpointGapAuditor, .dataCertification, .backupReadiness, .alerting:
+        case .supervisorCoordinator, .schemaDriftGuard, .verificationCoveragePlanner, .checkpointGapAuditor, .dataCertification, .backupReadiness, .backupRestoreVerifier, .alerting:
             return false
         }
     }

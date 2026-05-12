@@ -214,7 +214,13 @@ public struct ProductionSupervisor: Sendable {
     }
 
     private static func isBridgeRelated(_ error: Error) -> Bool {
-        error is MT5BridgeError || error is ProtocolError || error is ProductionAgentError
+        if error is MT5BridgeError || error is ProtocolError {
+            return true
+        }
+        if case ProductionAgentError.mt5BridgeUnavailable = error {
+            return true
+        }
+        return false
     }
 
     private func recoverClickHouseIfNeeded(after error: Error) async {

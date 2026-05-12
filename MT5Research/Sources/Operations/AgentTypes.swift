@@ -3,6 +3,8 @@ import Domain
 import Foundation
 
 public enum ProductionAgentKind: String, CaseIterable, Sendable {
+    case schemaDriftGuard = "schema_drift_guard"
+    case bridgeVersionGuard = "bridge_version_guard"
     case historyImporter = "history_importer"
     case liveM1Updater = "live_m1_updater"
     case databaseVerifierRepairer = "database_verifier_repairer"
@@ -10,29 +12,41 @@ public enum ProductionAgentKind: String, CaseIterable, Sendable {
     case healthMonitor = "health_monitor"
     case supervisorCoordinator = "supervisor_coordinator"
     case symbolMetadataDrift = "symbol_metadata_drift"
+    case sourceHistoryDrift = "source_history_drift"
+    case verificationCoveragePlanner = "verification_coverage_planner"
     case checkpointGapAuditor = "checkpoint_gap_auditor"
     case dataCertification = "data_certification"
     case backupReadiness = "backup_readiness"
+    case backupRestoreVerifier = "backup_restore_verifier"
     case alerting = "alerting"
 
     public var priorityRank: Int {
         switch self {
         case .supervisorCoordinator: return 10
         case .healthMonitor: return 20
-        case .utcTimeAuthority: return 30
-        case .symbolMetadataDrift: return 40
-        case .historyImporter: return 50
-        case .liveM1Updater: return 60
-        case .databaseVerifierRepairer: return 70
-        case .checkpointGapAuditor: return 80
-        case .dataCertification: return 85
-        case .backupReadiness: return 90
-        case .alerting: return 100
+        case .schemaDriftGuard: return 25
+        case .bridgeVersionGuard: return 30
+        case .utcTimeAuthority: return 40
+        case .symbolMetadataDrift: return 50
+        case .sourceHistoryDrift: return 55
+        case .historyImporter: return 60
+        case .liveM1Updater: return 70
+        case .databaseVerifierRepairer: return 80
+        case .verificationCoveragePlanner: return 85
+        case .checkpointGapAuditor: return 90
+        case .dataCertification: return 95
+        case .backupReadiness: return 100
+        case .backupRestoreVerifier: return 105
+        case .alerting: return 110
         }
     }
 
     public var displayName: String {
         switch self {
+        case .schemaDriftGuard:
+            return "Schema Guard"
+        case .bridgeVersionGuard:
+            return "Bridge Guard"
         case .historyImporter:
             return "History Importer"
         case .liveM1Updater:
@@ -47,12 +61,18 @@ public enum ProductionAgentKind: String, CaseIterable, Sendable {
             return "Supervisor"
         case .symbolMetadataDrift:
             return "Symbol Guard"
+        case .sourceHistoryDrift:
+            return "Source History Guard"
+        case .verificationCoveragePlanner:
+            return "Verification Planner"
         case .checkpointGapAuditor:
             return "Gap Auditor"
         case .dataCertification:
             return "Data Certifier"
         case .backupReadiness:
             return "Backup Readiness"
+        case .backupRestoreVerifier:
+            return "Restore Verifier"
         case .alerting:
             return "Alert Monitor"
         }
@@ -60,6 +80,10 @@ public enum ProductionAgentKind: String, CaseIterable, Sendable {
 
     public var startMessage: String {
         switch self {
+        case .schemaDriftGuard:
+            return "Checking ClickHouse schema and migration drift"
+        case .bridgeVersionGuard:
+            return "Checking MT5 bridge version and protocol identity"
         case .historyImporter:
             return "Starting or resuming historical M1 OHLC import"
         case .liveM1Updater:
@@ -74,12 +98,18 @@ public enum ProductionAgentKind: String, CaseIterable, Sendable {
             return "Checking supervisor ownership and schedule"
         case .symbolMetadataDrift:
             return "Checking MT5 symbols and digits"
+        case .sourceHistoryDrift:
+            return "Checking MT5 source history boundaries"
+        case .verificationCoveragePlanner:
+            return "Checking historical verification coverage plan"
         case .checkpointGapAuditor:
             return "Checking checkpoints, gaps and live lag"
         case .dataCertification:
             return "Creating cryptographic data certificates for verified history"
         case .backupReadiness:
             return "Checking canonical history readiness for backup"
+        case .backupRestoreVerifier:
+            return "Checking backup restore evidence"
         case .alerting:
             return "Checking runtime alerts and disk pressure"
         }
@@ -91,22 +121,32 @@ public enum ProductionAgentKind: String, CaseIterable, Sendable {
             return .brightCyan
         case .healthMonitor:
             return .brightGreen
+        case .schemaDriftGuard:
+            return .white
+        case .bridgeVersionGuard:
+            return .brightBlue
         case .utcTimeAuthority:
             return .brightMagenta
         case .symbolMetadataDrift:
             return .brightBlue
+        case .sourceHistoryDrift:
+            return .cyan
         case .historyImporter:
             return .green
         case .liveM1Updater:
             return .cyan
         case .databaseVerifierRepairer:
             return .magenta
+        case .verificationCoveragePlanner:
+            return .brightYellow
         case .checkpointGapAuditor:
             return .yellow
         case .dataCertification:
             return .brightYellow
         case .backupReadiness:
             return .blue
+        case .backupRestoreVerifier:
+            return .brightGreen
         case .alerting:
             return .gray
         }

@@ -431,10 +431,14 @@ Required fresh OK agent state before history data is considered safe for externa
 
 | Agent | Default max OK age | Purpose |
 | --- | ---: | --- |
+| `schema_drift_guard` | max(900s, 10x health interval) | Confirms required ClickHouse tables and critical columns still match FXExport migrations before data agents run. |
+| `bridge_version_guard` | max(900s, 10x health interval) | Confirms the attached MT5 EA is the FXExport bridge, uses the expected protocol schema, and matches the configured terminal identity. |
 | `utc_time_authority` | max(180s, 3x configured UTC interval) | Confirms broker server time is still covered by verified offset authority. |
 | `symbol_metadata_drift` | max(900s, 3x configured symbol interval) | Confirms MT5 symbols/digits still match config. |
+| `source_history_drift` | max(900s, 3x checkpoint audit interval) | Confirms MT5 source history boundaries still agree with stored checkpoints and flags newly available older history. |
 | `live_m1_updater` | max(120s, 6x live scan interval) | Confirms closed-M1 ingestion is currently healthy. |
 | `database_verifier_repairer` | max(7200s, 2x verifier interval) | Confirms DB integrity and MT5 random checks are clean according to config. |
+| `verification_coverage_planner` | max(7200s, 2x verifier interval) | Confirms configured symbols have SHA-256 verified coverage and clean MT5-vs-ClickHouse verification evidence. |
 | `checkpoint_gap_auditor` | max(900s, 3x checkpoint audit interval) | Confirms every configured symbol has a live checkpoint, checkpoint MT5 symbols still match config, checkpoint/canonical rows are consistent, and live lag is acceptable. |
 | `data_certification` | max(7200s, 2x backup interval) | Confirms verified coverage has SHA-256 data certificates for downstream audit/export safety. |
 
@@ -528,7 +532,7 @@ It serves `GET /v1/health` with ClickHouse reachability, broker source count, ca
 
 ## Production Supervisor Agents
 
-`supervise` runs eleven operational agents through one sequential supervisor. The supervisor owns the single MT5 bridge connection, uses the same broker runtime lock as standalone writer commands, records agent events in ClickHouse, and keeps retryable failures from advancing ingestion checkpoints.
+`supervise` runs sixteen operational agents through one sequential supervisor. The supervisor owns the single MT5 bridge connection, uses the same broker runtime lock as standalone writer commands, records agent events in ClickHouse, and keeps retryable failures from advancing ingestion checkpoints.
 
 The supervisor sorts due agents by explicit priority before every cycle:
 
@@ -536,17 +540,22 @@ The supervisor sorts due agents by explicit priority before every cycle:
 | ---: | --- | --- | --- |
 | 10 | `supervisor_coordinator` | 30s | Confirms single bridge ownership and sequential MT5 access. |
 | 20 | `health_monitor` | 30s | Checks ClickHouse and current MT5 bridge reachability. |
-| 30 | `utc_time_authority` | 60s | Verifies live broker server offset against DB-backed verified offset segments. |
-| 40 | `symbol_metadata_drift` | 300s | Checks configured MT5 symbols and digit metadata. |
-| 50 | `history_importer` | run once only when enabled | Owns first-run/resume backfill. |
-| 60 | `live_m1_updater` | 10s | Ingests newly closed M1 bars. |
-| 70 | `database_verifier_repairer` | 3600s | Runs DB checks, MT5 random cross-checks, and safe canonical repair. |
-| 80 | `checkpoint_gap_auditor` | 300s | Checks missing checkpoints, non-live ingest states, MT5 symbol mapping drift, checkpoint/canonical consistency, and live lag. |
-| 85 | `data_certification` | 3600s | Creates SHA-256 data certificates from verified coverage and canonical readback evidence. |
-| 90 | `backup_readiness` | 3600s | Verifies canonical data exists for the configured broker before backup/export workflows. |
-| 100 | `alerting` | 30s | Raises persistent alerts for runtime failures, stale safety agents, verifier/repair blockers, MT5 bridge outages, and disk pressure. |
+| 25 | `schema_drift_guard` | 30s | Checks ClickHouse schema/migration drift before protocol, UTC, ingestion, verification, certification, or backup agents run. |
+| 30 | `bridge_version_guard` | 30s | Checks the attached EA bridge name, version, protocol schema, and terminal identity. |
+| 40 | `utc_time_authority` | 60s | Verifies live broker server offset against DB-backed verified offset segments. |
+| 50 | `symbol_metadata_drift` | 300s | Checks configured MT5 symbols and digit metadata. |
+| 55 | `source_history_drift` | 300s | Compares MT5 oldest/latest closed M1 source boundaries with stored checkpoints. |
+| 60 | `history_importer` | run once only when enabled | Owns first-run/resume backfill. |
+| 70 | `live_m1_updater` | 10s | Ingests newly closed M1 bars. |
+| 80 | `database_verifier_repairer` | 3600s | Runs DB checks, MT5 random cross-checks, and safe canonical repair. |
+| 85 | `verification_coverage_planner` | 3600s | Checks SHA-256 verified coverage and clean historical verification evidence per configured symbol. |
+| 90 | `checkpoint_gap_auditor` | 300s | Checks missing checkpoints, non-live ingest states, MT5 symbol mapping drift, checkpoint/canonical consistency, and live lag. |
+| 95 | `data_certification` | 3600s | Creates SHA-256 data certificates from verified coverage and canonical readback evidence. |
+| 100 | `backup_readiness` | 3600s | Verifies canonical data exists for the configured broker before backup/export workflows. |
+| 105 | `backup_restore_verifier` | 3600s | Checks restore evidence from valid data certificates and confirms no unfinished ingest/repair batches block restore confidence. |
+| 110 | `alerting` | 30s | Raises persistent alerts for runtime failures, stale safety agents, verifier/repair blockers, MT5 bridge outages, and disk pressure. |
 
-Supersedence rules are conservative. `history_importer` blocks live updates, verifier/repair, checkpoint audit, and backup readiness for that cycle because it owns canonical writes and checkpoints during first-run/resume. A failed or warning UTC authority blocks ingestion and verification because canonical UTC cannot be trusted. Symbol metadata failures block ingestion and verification. Verifier or checkpoint warnings block backup readiness; this includes missing checkpoints, interrupted backfills, checkpoint MT5 symbol drift, canonical checkpoint mismatches, and live lag. Health failures block all MT5-dependent and data-quality agents. Dynamic supersedence persists across cycles until the source agent reports OK, so a failed UTC or symbol check cannot be bypassed merely because its next scheduled check is not due yet. A failed first-run importer is retried on the checkpoint-audit interval instead of being marked completed.
+Supersedence rules are conservative. Schema drift blocks every downstream protocol, UTC, ingestion, verification, certification, and backup agent. Bridge version/identity failures block MT5-backed work. `history_importer` blocks live updates, source-history drift checks, verifier/repair, verification coverage planning, checkpoint audit, certification, backup readiness, and restore verification for that cycle because it owns canonical writes and checkpoints during first-run/resume. A failed or warning UTC authority blocks ingestion and verification because canonical UTC cannot be trusted. Symbol metadata failures block ingestion and verification. Source-history drift warnings block certification and backup/restore confidence until checkpoints are reconciled. Verifier, verification planner, or checkpoint warnings block certification and backup/restore readiness; this includes missing checkpoints, interrupted backfills, checkpoint MT5 symbol drift, canonical checkpoint mismatches, and live lag. Health failures block schema, bridge, MT5-dependent, and data-quality agents. Dynamic supersedence persists across cycles until the source agent reports OK, so a failed UTC or symbol check cannot be bypassed merely because its next scheduled check is not due yet. A failed first-run importer is retried on the checkpoint-audit interval instead of being marked completed.
 
 Supervisor intervals are configured under `supervisor` in `Config/app.json`. The default production stance is to leave backfill disabled in the supervisor and run it deliberately, then use `supervise` for ongoing operation.
 
@@ -571,7 +580,7 @@ Implemented:
 - TCP socket transport in Swift with separate connect/accept timeout and request read/write timeout.
 - ClickHouse HTTP client and migrations.
 - Backfill/live update agents with MT5 history synchronization checks, double-read source completeness proofs, conflict recording, verified coverage certificates, checkpoint-after-canonical-readback flow, and canonical range replacement.
-- Production supervisor with eleven operational agents, priority/supersedence rules, broker runtime lock, and runtime event/state tables.
+- Production supervisor with sixteen operational agents, priority/supersedence rules, broker runtime lock, and runtime event/state tables.
 - SHA-256 data certification agent and `data_certificates` table for verified coverage audit evidence.
 - Read-only operational health API at `/v1/health`.
 - Operational failure guide command with action-oriented recovery advice for unattended operation.

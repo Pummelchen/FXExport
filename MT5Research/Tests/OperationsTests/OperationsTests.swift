@@ -333,16 +333,18 @@ final class OperationsTests: XCTestCase {
 
     func testAgentSchedulerSortsByPriority() {
         let backup = StubAgent(descriptor: AgentDescriptor(kind: .backupReadiness, intervalSeconds: 60, requiresMT5Bridge: false))
+        let schema = StubAgent(descriptor: AgentDescriptor(kind: .schemaDriftGuard, intervalSeconds: 60, requiresMT5Bridge: false))
+        let bridge = StubAgent(descriptor: AgentDescriptor(kind: .bridgeVersionGuard, intervalSeconds: 60, requiresMT5Bridge: true))
         let health = StubAgent(descriptor: AgentDescriptor(kind: .healthMonitor, intervalSeconds: 60, requiresMT5Bridge: false))
         let utc = StubAgent(descriptor: AgentDescriptor(kind: .utcTimeAuthority, intervalSeconds: 60, requiresMT5Bridge: true))
         var scheduler = AgentScheduler()
 
         let due = scheduler.dueAgents(
-            from: [backup, utc, health],
+            from: [backup, utc, bridge, health, schema],
             now: Date(timeIntervalSince1970: 1_700_000_000)
         ).map(\.descriptor.kind)
 
-        XCTAssertEqual(due, [.healthMonitor, .utcTimeAuthority, .backupReadiness])
+        XCTAssertEqual(due, [.healthMonitor, .schemaDriftGuard, .bridgeVersionGuard, .utcTimeAuthority, .backupReadiness])
     }
 
     func testAgentSchedulerDeferredAgentRetriesAfterShortDelay() {
@@ -371,6 +373,34 @@ final class OperationsTests: XCTestCase {
 
         XCTAssertFalse(due.contains(.historyImporter))
         XCTAssertTrue(due.contains(.liveM1Updater))
+    }
+
+    func testProductionAgentFactoryIncludesGuardAgentsInPriorityOrder() throws {
+        let config = try makeConfig()
+        let agents = ProductionAgentFactory().makeAgents(config: config, runBackfillOnStart: false)
+        let kinds = agents.map(\.descriptor.kind)
+
+        XCTAssertEqual(
+            kinds,
+            [
+                .supervisorCoordinator,
+                .healthMonitor,
+                .schemaDriftGuard,
+                .bridgeVersionGuard,
+                .utcTimeAuthority,
+                .symbolMetadataDrift,
+                .sourceHistoryDrift,
+                .historyImporter,
+                .liveM1Updater,
+                .databaseVerifierRepairer,
+                .verificationCoveragePlanner,
+                .checkpointGapAuditor,
+                .dataCertification,
+                .backupReadiness,
+                .backupRestoreVerifier,
+                .alerting
+            ]
+        )
     }
 
     func testEnabledHistoryImporterUsesCheckpointAuditRetryInterval() throws {
@@ -466,10 +496,12 @@ final class OperationsTests: XCTestCase {
 
     func testAgentExecutionPolicySupersedesConflictingAgents() {
         let policy = AgentExecutionPolicy()
-        let staticBlocked = policy.staticSupersedence(for: [.historyImporter, .liveM1Updater, .databaseVerifierRepairer, .backupReadiness])
+        let staticBlocked = policy.staticSupersedence(for: [.historyImporter, .liveM1Updater, .databaseVerifierRepairer, .backupReadiness, .backupRestoreVerifier])
         XCTAssertEqual(staticBlocked[.liveM1Updater], "history_importer owns first-run/resume canonical writes this cycle")
+        XCTAssertEqual(staticBlocked[.sourceHistoryDrift], "history_importer owns first-run/resume canonical writes this cycle")
         XCTAssertEqual(staticBlocked[.databaseVerifierRepairer], "history_importer owns first-run/resume canonical writes this cycle")
         XCTAssertEqual(staticBlocked[.backupReadiness], "history_importer owns first-run/resume canonical writes this cycle")
+        XCTAssertEqual(staticBlocked[.backupRestoreVerifier], "history_importer owns first-run/resume canonical writes this cycle")
 
         let outcome = AgentOutcome(
             agent: .utcTimeAuthority,
@@ -484,6 +516,81 @@ final class OperationsTests: XCTestCase {
         XCTAssertTrue(dynamicBlocked.keys.contains(.historyImporter))
         XCTAssertTrue(dynamicBlocked.keys.contains(.liveM1Updater))
         XCTAssertTrue(dynamicBlocked.keys.contains(.databaseVerifierRepairer))
+
+        let schemaOutcome = AgentOutcome(
+            agent: .schemaDriftGuard,
+            status: .failed,
+            severity: .error,
+            message: "schema drift",
+            startedAtUtc: UtcSecond(rawValue: 1),
+            finishedAtUtc: UtcSecond(rawValue: 2),
+            durationMilliseconds: 1
+        )
+        let schemaBlocked = policy.dynamicSupersedence(after: schemaOutcome)
+        XCTAssertTrue(schemaBlocked.keys.contains(.bridgeVersionGuard))
+        XCTAssertTrue(schemaBlocked.keys.contains(.historyImporter))
+        XCTAssertTrue(schemaBlocked.keys.contains(.backupRestoreVerifier))
+    }
+
+    func testSchemaDriftGuardFailsWhenRequiredTablesAreMissing() async throws {
+        let config = try makeConfig()
+        let agent = SchemaDriftGuardAgent(intervalSeconds: 60)
+        let context = AgentRuntimeContext(
+            config: config,
+            clickHouse: FixedClickHouse(body: ""),
+            bridge: nil,
+            eventStore: InMemoryAgentEventStore(),
+            logger: Logger(level: .quiet),
+            supervisorStartedAtUtc: UtcSecond(rawValue: 1),
+            repairOnVerifierMismatch: false
+        )
+
+        let outcome = try await agent.run(context: context, startedAt: Date(timeIntervalSince1970: 1))
+
+        XCTAssertEqual(outcome.status, .failed)
+        XCTAssertTrue(outcome.message.contains("missing required tables"))
+        XCTAssertTrue(outcome.details.contains("mt5_ohlc_m1_raw"))
+    }
+
+    func testVerificationCoveragePlannerWarnsOnMissingCoverageAndCleanVerification() async throws {
+        let config = try makeConfig()
+        let clickHouse = VerificationPlannerClickHouse()
+        let agent = VerificationCoveragePlannerAgent(intervalSeconds: 3600)
+        let context = AgentRuntimeContext(
+            config: config,
+            clickHouse: clickHouse,
+            bridge: nil,
+            eventStore: InMemoryAgentEventStore(),
+            logger: Logger(level: .quiet),
+            supervisorStartedAtUtc: UtcSecond(rawValue: 1),
+            repairOnVerifierMismatch: false
+        )
+
+        let outcome = try await agent.run(context: context, startedAt: Date(timeIntervalSince1970: 1))
+
+        XCTAssertEqual(outcome.status, .warning)
+        XCTAssertTrue(outcome.details.contains("missing_coverage=USDJPY"))
+        XCTAssertTrue(outcome.details.contains("missing_clean_verification=USDJPY"))
+    }
+
+    func testBackupRestoreVerifierBlocksOnUnfinishedOperations() async throws {
+        let config = try makeConfig()
+        let clickHouse = BackupRestoreClickHouse(mode: .unfinished)
+        let agent = BackupRestoreVerifierAgent(intervalSeconds: 3600)
+        let context = AgentRuntimeContext(
+            config: config,
+            clickHouse: clickHouse,
+            bridge: nil,
+            eventStore: InMemoryAgentEventStore(),
+            logger: Logger(level: .quiet),
+            supervisorStartedAtUtc: UtcSecond(rawValue: 1),
+            repairOnVerifierMismatch: false
+        )
+
+        let outcome = try await agent.run(context: context, startedAt: Date(timeIntervalSince1970: 1))
+
+        XCTAssertEqual(outcome.status, .warning)
+        XCTAssertTrue(outcome.message.contains("unfinished ingest or repair batches"))
     }
 
     func testInMemoryAgentEventStoreRecordsOutcomes() async throws {
@@ -877,6 +984,61 @@ private actor RecordingClickHouse: ClickHouseClientProtocol {
     }
 }
 
+private actor FixedClickHouse: ClickHouseClientProtocol {
+    private let body: String
+
+    init(body: String) {
+        self.body = body
+    }
+
+    func execute(_ query: ClickHouseQuery) async throws -> String {
+        body
+    }
+}
+
+private actor VerificationPlannerClickHouse: ClickHouseClientProtocol {
+    func execute(_ query: ClickHouseQuery) async throws -> String {
+        let sql = query.sql
+        if sql.contains("ohlc_m1_canonical") {
+            return "1\t60\t120\n"
+        }
+        if sql.contains("ohlc_m1_verified_coverage") {
+            return sql.contains("logical_symbol = 'EURUSD'") ? "1\t60\t120\t1\t1\n" : "0\t0\t0\t0\t0\n"
+        }
+        if sql.contains("verification_results") {
+            return sql.contains("logical_symbol = 'EURUSD'") ? "1\n" : "0\n"
+        }
+        return "0\n"
+    }
+}
+
+private enum BackupRestoreMode {
+    case clean
+    case unfinished
+}
+
+private actor BackupRestoreClickHouse: ClickHouseClientProtocol {
+    private let mode: BackupRestoreMode
+
+    init(mode: BackupRestoreMode) {
+        self.mode = mode
+    }
+
+    func execute(_ query: ClickHouseQuery) async throws -> String {
+        let sql = query.sql
+        if sql.contains("FROM db.data_certificates") && sql.contains("sum(coverage_source_bar_count)") {
+            return "1\t10\t10\t60\t120\n"
+        }
+        if sql.contains("FROM db.data_certificates") {
+            return "0\n"
+        }
+        if sql.contains("FROM db.ingest_operations") {
+            return mode == .unfinished ? "1\n" : "0\n"
+        }
+        return "0\n"
+    }
+}
+
 private enum BacktestGateMode {
     case clean
     case interruptedBackfill
@@ -918,10 +1080,14 @@ private actor BacktestGateClickHouse: ClickHouseClientProtocol {
             guard mode != .missingRequiredAgentState else { return "" }
             let now = Int64(Date().timeIntervalSince1970)
             return """
+            schema_drift_guard\t\(now)
+            bridge_version_guard\t\(now)
             utc_time_authority\t\(now)
             symbol_metadata_drift\t\(now)
+            source_history_drift\t\(now)
             live_m1_updater\t\(now)
             database_verifier_repairer\t\(now)
+            verification_coverage_planner\t\(now)
             checkpoint_gap_auditor\t\(now)
             data_certification\t\(now)
 
