@@ -5,18 +5,8 @@ import Foundation
 struct InteractiveCommandSession: Sendable {
     private let coordinator: InteractiveCommandCoordinator
 
-    init(startupArguments: [String]) {
-        coordinator = InteractiveCommandCoordinator(startupArguments: startupArguments)
-    }
-
-    static func shouldStart(arguments: [String]) -> Bool {
-        guard let first = arguments.first else { return true }
-        let normalized = first.lowercased()
-        if shellCommandNames.contains(normalized) { return true }
-        if first.hasPrefix("--"), normalized != "--help", normalized != "--startcheck" {
-            return true
-        }
-        return false
+    init(ignoredLaunchArguments: [String] = []) {
+        coordinator = InteractiveCommandCoordinator(ignoredLaunchArguments: ignoredLaunchArguments)
     }
 
     func run() async -> ExitCode {
@@ -48,32 +38,20 @@ private actor InteractiveCommandCoordinator {
 
     private let tokenizer = CommandLineTokenizer()
     private let colorPolicy = TerminalColorPolicy()
-    private let defaultOptions: [String]
-    private let startupWarnings: [String]
+    private let ignoredLaunchArguments: [String]
     private var activeCommand: ActiveCommand?
 
-    init(startupArguments: [String]) {
-        let rawDefaults: [String]
-        if let first = startupArguments.first,
-           InteractiveCommandSession.shellCommandNames.contains(first.lowercased()) {
-            rawDefaults = Array(startupArguments.dropFirst())
-        } else {
-            rawDefaults = startupArguments
-        }
-        let parsed = Self.parseStartupDefaults(rawDefaults)
-        self.defaultOptions = parsed.options
-        self.startupWarnings = parsed.warnings
+    init(ignoredLaunchArguments: [String]) {
+        self.ignoredLaunchArguments = ignoredLaunchArguments
     }
 
     func printBanner() {
         info("FXExport interactive command shell started")
         info("Type an FXExport command at the prompt, for example: supervise --with-backfill")
         info("Control commands: status, stop, wait, help, exit")
-        if !defaultOptions.isEmpty {
-            info("Session defaults applied to app commands: \(defaultOptions.joined(separator: " "))")
-        }
-        for warning in startupWarnings {
-            warn(warning)
+        if !ignoredLaunchArguments.isEmpty {
+            warn("Launch-time input is not accepted and was ignored: \(ignoredLaunchArguments.joined(separator: " "))")
+            warn("Paste the command text at the `>` prompt instead.")
         }
     }
 
@@ -90,7 +68,7 @@ private actor InteractiveCommandCoordinator {
         }
         guard !tokens.isEmpty else { return true }
 
-        var commandTokens = stripBinaryPrefix(tokens)
+        let commandTokens = stripBinaryPrefix(tokens)
         guard let first = commandTokens.first else { return true }
         switch first.lowercased() {
         case "exit", "quit":
@@ -113,7 +91,6 @@ private actor InteractiveCommandCoordinator {
             info("Already running inside the FXExport interactive command shell")
             return true
         default:
-            commandTokens = applyDefaultOptions(to: commandTokens)
             await startAppCommand(commandTokens)
             return true
         }
@@ -203,6 +180,7 @@ private actor InteractiveCommandCoordinator {
           verify --random-ranges 20
           repair --symbol EURUSD --from 2020-01-01 --to 2020-02-01
           data-check --config Config/history_data.json
+          fxbacktest-api --api-host 127.0.0.1 --api-port 5066
 
         Control commands:
           status   show the active command
@@ -217,31 +195,6 @@ private actor InteractiveCommandCoordinator {
         """)
     }
 
-    private func applyDefaultOptions(to tokens: [String]) -> [String] {
-        guard !defaultOptions.isEmpty else { return tokens }
-        var result = tokens
-        var index = 0
-        while index < defaultOptions.count {
-            let option = defaultOptions[index]
-            switch option {
-            case "--config-dir", "--migrations-dir":
-                if !result.contains(option), index + 1 < defaultOptions.count {
-                    result.append(option)
-                    result.append(defaultOptions[index + 1])
-                }
-                index += 2
-            case "--verbose", "--debug":
-                if !result.contains("--verbose"), !result.contains("--debug") {
-                    result.append(option)
-                }
-                index += 1
-            default:
-                index += 1
-            }
-        }
-        return result
-    }
-
     private func stripBinaryPrefix(_ tokens: [String]) -> [String] {
         guard let first = tokens.first else { return tokens }
         let lower = first.lowercased()
@@ -249,33 +202,6 @@ private actor InteractiveCommandCoordinator {
             return Array(tokens.dropFirst())
         }
         return tokens
-    }
-
-    private static func parseStartupDefaults(_ arguments: [String]) -> (options: [String], warnings: [String]) {
-        var options: [String] = []
-        var warnings: [String] = []
-        var index = 0
-        while index < arguments.count {
-            let argument = arguments[index]
-            switch argument {
-            case "--config-dir", "--migrations-dir":
-                guard index + 1 < arguments.count else {
-                    warnings.append("Ignoring \(argument): missing value")
-                    index += 1
-                    continue
-                }
-                options.append(argument)
-                options.append(arguments[index + 1])
-                index += 2
-            case "--verbose", "--debug":
-                options.append(argument)
-                index += 1
-            default:
-                warnings.append("Ignoring startup shell option '\(argument)'; paste full app commands at the prompt instead")
-                index += 1
-            }
-        }
-        return (options, warnings)
     }
 
     private func info(_ message: String) {

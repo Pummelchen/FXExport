@@ -154,7 +154,7 @@ public enum ClickHouseStartupError: Error, CustomStringConvertible, Sendable {
             Next steps:
               1. If this should be local Homebrew ClickHouse, set Config/clickhouse.json url to http://localhost:8123.
               2. If this is a remote ClickHouse server, start it on the remote host or fix network/authentication.
-              3. Rerun: FXExport startcheck --config-dir Config --migrations-dir Migrations
+              3. At the FXExport prompt run: startcheck --config-dir Config --migrations-dir Migrations
             """
         case .noStartCommand(let url):
             return """
@@ -164,7 +164,7 @@ public enum ClickHouseStartupError: Error, CustomStringConvertible, Sendable {
               2. Confirm ClickHouse is installed: command -v clickhouse
               3. Try manually: brew services start clickhouse
               4. If your install uses the standalone daemon, try: clickhouse start
-              5. Rerun: FXExport startcheck --config-dir Config --migrations-dir Migrations
+              5. At the FXExport prompt run: startcheck --config-dir Config --migrations-dir Migrations
             """
         case .startFailed(let url, let attempts):
             let attemptText = attempts
@@ -183,7 +183,7 @@ public enum ClickHouseStartupError: Error, CustomStringConvertible, Sendable {
               2. Run: brew services start clickhouse
               3. If that fails, run: clickhouse start
               4. Check the ClickHouse log/config for your install.
-              5. Rerun: FXExport startcheck --config-dir Config --migrations-dir Migrations
+              5. At the FXExport prompt run: startcheck --config-dir Config --migrations-dir Migrations
             """
         }
     }

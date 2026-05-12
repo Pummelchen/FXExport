@@ -1,6 +1,6 @@
 # FXExport
 
-FXExport is a macOS terminal Swift project for exporting MetaTrader 5 historical M1 OHLC data into ClickHouse, verifying it against MT5, repairing canonical ranges only when safe, and providing a read-only Swift history-data API for external CPU and Metal backtest applications on Apple Silicon.
+FXExport is a macOS terminal Swift project for exporting MetaTrader 5 historical M1 OHLC data into ClickHouse, verifying it against MT5, repairing canonical ranges only when safe, and serving verified history to FXBacktest through a dedicated HTTP API v1.
 
 The implementation is intentionally defensive:
 
@@ -11,8 +11,8 @@ The implementation is intentionally defensive:
 - The current open M1 bar must never be ingested.
 - ClickHouse primary keys are not treated as uniqueness constraints.
 - FXExport does not run strategies or optimizations internally.
-- External Swift backtest applications should read verified canonical data through `FXExportHistoryData`.
-- Optional Metal support is limited to read-only OHLC buffer preparation; strategy kernels belong in the external app.
+- FXBacktest and any other external backtest client must read verified canonical data through the dedicated FXBacktest API v1, never by connecting to ClickHouse directly.
+- Optional Metal support inside FXExport is limited to internal read-only OHLC buffer preparation checks; strategy kernels belong in FXBacktest or another external app.
 
 ## Architecture
 
@@ -31,9 +31,9 @@ The system has two parts:
    - Validates and converts MT5 data.
    - Writes raw audit rows and canonical OHLC rows to ClickHouse.
    - Runs backfill, live updates, MT5 cross-check verification, canonical-only repair, and history-data readiness checks.
+   - Serves FXBacktest API v1 on a local HTTP endpoint after the same readiness gates pass.
    - Exposes SwiftPM library products:
-     - `FXExportHistoryData`: read-only canonical M1 OHLC loading from ClickHouse into columnar arrays.
-     - `FXExportMetalData`: optional Metal buffer preparation for those arrays on Apple Silicon.
+     - `FXExportFXBacktestAPI`: shared v1 request/response DTOs and a small HTTP client for FXBacktest.
 
 Important MT5 socket note: standard MQL5 sockets are client-oriented. The sample EA therefore connects to the Swift listener. The Swift transport also supports outbound client mode for future bridge variants.
 
@@ -78,56 +78,70 @@ swift build -c release
 ```
 
 3. Copy and edit the local configs in `Config/`. Keep the ClickHouse password only in `Config/clickhouse.json`; this directory is ignored by Git.
-4. Run the database and EA preflight. This applies idempotent migrations, verifies required tables, runs DB-only integrity checks, and compiles `FXExport.mq5` through MetaEditor from the terminal:
+4. Start the resident terminal app:
 
 ```bash
-.build/release/FXExport startcheck --config-dir Config --migrations-dir Migrations --skip-bridge
+.build/release/FXExport
 ```
 
-5. Attach the compiled `FXExport` EA in MT5. Set `SwiftHost = 127.0.0.1` and `SwiftPort = 5055`, then allow localhost sockets in MT5/Wine if prompted.
-6. Run the full go-live gate. This repeats the DB and EA compile checks, waits for the EA socket, verifies the connected MT5 terminal identity, checks the live server offset through the EA, proves verified offset coverage for the configured MT5 history, and tests `GET_RATES_FROM_POSITION` with `start_pos=1` so the open M1 bar is excluded:
+5. At the `>` prompt, run the database and EA preflight. This applies idempotent migrations, verifies required tables, runs DB-only integrity checks, and compiles `FXExport.mq5` through MetaEditor from the terminal:
 
-```bash
-.build/release/FXExport startcheck --config-dir Config --migrations-dir Migrations
+```text
+> startcheck --config-dir Config --migrations-dir Migrations --skip-bridge
+```
+
+6. Attach the compiled `FXExport` EA in MT5. Set `SwiftHost = 127.0.0.1` and `SwiftPort = 5055`, then allow localhost sockets in MT5/Wine if prompted.
+7. Run the full go-live gate. This repeats the DB and EA compile checks, waits for the EA socket, verifies the connected MT5 terminal identity, checks the live server offset through the EA, proves verified offset coverage for the configured MT5 history, and tests `GET_RATES_FROM_POSITION` with `start_pos=1` so the open M1 bar is excluded:
+
+```text
+> startcheck --config-dir Config --migrations-dir Migrations
 ```
 
 If `startcheck` stops at the bridge step, follow the terminal message: start MT5, attach the compiled EA, verify the host/port, then rerun the same command. If it reports missing `broker_time_offsets`, insert active, verified historical offset authority for the exact MT5 company/server/account shown by the EA. Do not calculate the current live offset by hand; `startcheck`, `bridge-check`, `backfill`, `live`, and MT5-backed `verify` check the live offset automatically through the EA.
 
-7. Confirm symbol mappings and broker digits:
+8. Confirm symbol mappings and broker digits:
 
-```bash
-.build/release/FXExport symbol-check --config-dir Config
+```text
+> symbol-check --config-dir Config
 ```
 
-8. Run the initial historical backfill:
+9. Run the initial historical backfill:
 
-```bash
-.build/release/FXExport backfill --config-dir Config --symbols all
+```text
+> backfill --config-dir Config --symbols all
 ```
 
-9. Run verification without random MT5 ranges first, then with MT5 random ranges when the bridge is connected:
+10. Run verification without random MT5 ranges first, then with MT5 random ranges when the bridge is connected:
 
-```bash
-.build/release/FXExport verify --config-dir Config --random-ranges 0
-.build/release/FXExport verify --config-dir Config --random-ranges 20
+```text
+> verify --config-dir Config --random-ranges 0
+> verify --config-dir Config --random-ranges 20
 ```
 
-10. Start live updates only after backfill is complete or intentionally resumed:
+11. Start the dedicated FXBacktest API v1 when FXBacktest needs historical data:
 
-```bash
-.build/release/FXExport live --config-dir Config
+```text
+> fxbacktest-api --config-dir Config --api-host 127.0.0.1 --api-port 5066
+```
+
+Leave this command running while FXBacktest loads M1 OHLC data. The API server is the only supported external data path for FXBacktest.
+
+12. Start live updates only after backfill is complete or intentionally resumed:
+
+```text
+> live --config-dir Config
 ```
 
 For production operation, prefer the supervised runtime instead of running `live` alone:
 
-```bash
-.build/release/FXExport supervise --config-dir Config
+```text
+> supervise --config-dir Config
 ```
 
 If the first historical import should be owned by the supervisor, start it explicitly:
 
-```bash
-.build/release/FXExport supervise --config-dir Config --with-backfill
+```text
+> supervise --config-dir Config --with-backfill
 ```
 
 ## Configuration
@@ -234,8 +248,8 @@ If `expected_terminal_identity` values are provided, `bridge-check`, `backfill`,
 
 Run:
 
-```bash
-swift run FXExport migrate
+```text
+> migrate
 ```
 
 This creates:
@@ -268,17 +282,17 @@ If the first backfill is interrupted by a crash, reboot, terminal close, MT5 dis
 
 Safe recovery sequence:
 
-```bash
-.build/release/FXExport migrate --config-dir Config --migrations-dir Migrations
-.build/release/FXExport verify --config-dir Config --random-ranges 0
-.build/release/FXExport backfill --config-dir Config --symbols all
-.build/release/FXExport verify --config-dir Config --random-ranges 20
-.build/release/FXExport supervise --config-dir Config
+```text
+> migrate --config-dir Config --migrations-dir Migrations
+> verify --config-dir Config --random-ranges 0
+> backfill --config-dir Config --symbols all
+> verify --config-dir Config --random-ranges 20
+> supervise --config-dir Config
 ```
 
 Backfill is designed to be rerun. A checkpoint is advanced only after MT5 source double-read verification, raw insert, canonical range replacement, canonical insert, canonical readback verification, SHA-256 chunk evidence, and verified coverage write all succeed. If the process crashes before that point, rerunning backfill starts again from the last verified checkpoint. Canonical rows for the retried range are deleted and reinserted by both MT5 server-time range and UTC identity range, so duplicate canonical bars should not accumulate. Until the retried deterministic batch reaches a terminal status in `ingest_operations`, `data-check` and the read-only history API block the affected database from being used for backtests.
 
-Do not run `backfill`, `live`, `repair`, or `supervise` in parallel for the same `broker_source_id`. The CLI enforces this with a broker-level runtime lock under `/tmp`; if another writer or supervisor is active, the second command exits before touching MT5, canonical data, or checkpoints.
+Do not run `backfill`, `live`, `repair`, or `supervise` in parallel for the same `broker_source_id`. The command runtime enforces this with a broker-level runtime lock under `/tmp`; if another writer or supervisor is active, the second command exits before touching MT5, canonical data, or checkpoints.
 
 Before oldest/latest discovery for each symbol, backfill asks the EA for MT5 M1 history status and waits up to 60 seconds for synchronization. If MT5 has not synchronized local history, backfill stops for that symbol instead of snapshotting a partial oldest/latest range.
 
@@ -292,8 +306,8 @@ Raw audit rows are append-only. A crash/retry may leave repeated raw audit attem
 
 Keep `EA/FXExport.mq5` under the MT5 `MQL5/Experts` tree and let `startcheck` compile it through MetaEditor:
 
-```bash
-.build/release/FXExport startcheck --config-dir Config --migrations-dir Migrations --skip-bridge
+```text
+> startcheck --config-dir Config --migrations-dir Migrations --skip-bridge
 ```
 
 If your package is outside the MT5 Experts tree, copy `EA/FXExport.mq5` into `MQL5/Experts` first or set `MT5RESEARCH_METAEDITOR`, `MT5RESEARCH_WINE`, and `MT5RESEARCH_WINEPREFIX` so the terminal compile check can find the MT5 toolchain.
@@ -303,43 +317,50 @@ Attach it to a chart and enable socket/network permissions required by your MT5/
 - `SwiftHost = 127.0.0.1`
 - `SwiftPort = 5055`
 
-Then start a Swift command that listens for the EA.
+Then run the needed command from the already-open `>` prompt so Swift listens for the EA.
 
-## CLI Commands
+## Interactive Commands
 
-At startup, commands that require ClickHouse first run a local readiness check. If local ClickHouse is stopped, the program tries to start it and waits for the HTTP endpoint before continuing. Commands that require MT5 print action-oriented bridge setup guidance when the EA/socket is not ready instead of leaving the user with only a low-level socket error.
+FXExport is now a resident terminal app. Start it without launch-time input:
 
 ```bash
 swift run FXExport
-swift run FXExport shell --config-dir Config
-swift run FXExport migrate
-swift run FXExport bridge-check
-swift run FXExport symbol-check
-swift run FXExport backfill --symbols all
-swift run FXExport backfill --symbols EURUSD,USDJPY
-swift run FXExport live
-swift run FXExport supervise
-swift run FXExport supervise --with-backfill
-swift run FXExport supervise --supervisor-cycles 1
-swift run FXExport startcheck
-swift run FXExport -startcheck
-swift run FXExport failure-guide
-swift run FXExport verify
-swift run FXExport verify --random-ranges 20
-swift run FXExport repair --symbol EURUSD --from 2020-01-01 --to 2020-02-01
-swift run FXExport data-check --config Config/history_data.json
 ```
 
-Global options:
+The app does not execute commands passed at launch. Paste command text into the internal `>` prompt instead:
 
-```bash
+```text
+> migrate
+> bridge-check
+> symbol-check
+> backfill --symbols all
+> backfill --symbols EURUSD,USDJPY
+> live
+> supervise
+> supervise --with-backfill
+> supervise --supervisor-cycles 1
+> startcheck
+> failure-guide
+> verify
+> verify --random-ranges 20
+> repair --symbol EURUSD --from 2020-01-01 --to 2020-02-01
+> data-check --config Config/history_data.json
+> fxbacktest-api --api-host 127.0.0.1 --api-port 5066
+```
+
+Command options:
+
+```text
 --config-dir Config
 --migrations-dir Migrations
+--config Config/history_data.json   # data-check only
+--api-host 127.0.0.1                # fxbacktest-api only
+--api-port 5066                     # fxbacktest-api only
 --verbose
 --debug
 ```
 
-Running `FXExport` without a command starts the resident interactive command shell. The app keeps printing normal status lines to the terminal and also shows a `>` prompt. Paste the same command string you would normally pass after the binary, for example `supervise --with-backfill`, `verify --random-ranges 20`, or `repair --symbol EURUSD --from 2020-01-01 --to 2020-02-01`.
+Commands that require ClickHouse first run a local readiness check. If local ClickHouse is stopped, the program tries to start it and waits for the HTTP endpoint before continuing. Commands that require MT5 print action-oriented bridge setup guidance when the EA/socket is not ready instead of leaving the user with only a low-level socket error.
 
 Shell control commands:
 
@@ -371,9 +392,9 @@ Use `--skip-bridge` only for the early preflight before the EA is attached. A pr
 
 `repair --from` and `--to` are UTC dates in `YYYY-MM-DD` format. Repair first verifies the requested range against MT5 through the stable source-read path, repairs canonical rows only when the mismatch is unambiguous and UTC mapping is verified, writes `repair_log`, records repair stages in `ingest_operations`, writes fresh verified coverage after canonical readback, and then verifies the range again. Raw audit rows are never deleted.
 
-`data-check` runs the same safety gate external backtest applications should use, then reads verified canonical M1 bars directly from ClickHouse into a columnar `ColumnarOhlcSeries`. If `"use_metal": true` is set in the config, it also prepares read-only Metal buffers from the same arrays. No local cache is written.
+`data-check` is an operator diagnostic inside FXExport. It runs the same safety gate used by `fxbacktest-api`, then reads verified canonical M1 bars through FXExport's internal ClickHouse-backed pipeline. External backtest applications must not copy this internal path or connect to ClickHouse directly. If `"use_metal": true` is set in the config, the diagnostic also prepares read-only Metal buffers from the same arrays. No local cache is written.
 
-`export-cache`, `backtest`, and `optimize` intentionally fail closed. FXExport is the history-data provider; strategy execution, parameter sweeps, durable optimizer jobs, and result persistence belong in the external Swift backtest application.
+`export-cache`, `backtest`, and `optimize` intentionally fail closed. FXExport is the history-data provider; strategy execution, optimization sweeps, durable optimizer jobs, and result persistence belong in the external Swift backtest application.
 
 ## Terminal Output
 
@@ -402,7 +423,7 @@ FXExport only prints "clean" after the relevant safety step has succeeded: valid
 
 ## History Data Readiness Gate
 
-`data-check` and external backtest applications should run the database safety gate before loading canonical bars. The gate blocks when:
+`data-check` and `fxbacktest-api` run the database safety gate before loading canonical bars. FXBacktest reaches that gate only through the API, not through direct database access. The gate blocks when:
 
 - Any configured symbol has no checkpoint, a non-`live` ingest status, or a checkpoint mapped to a different configured MT5 symbol.
 - The requested data end is beyond the target symbol's latest verified checkpoint.
@@ -425,42 +446,76 @@ Required fresh OK agent state before history data is considered safe for externa
 
 This means a freshly loaded database is not considered safe for external backtests until the supervisor has run the safety agents successfully. If a first import was interrupted, `ingest_state.status` remains `backfilling` or `ingest_operations` contains a non-terminal batch, so history-data reads for backtesting stay blocked until backfill is rerun, all deterministic batches are terminal, and all configured symbols reach `live`.
 
-## Swift History Data API
+## FXBacktest API v1
 
-External Swift packages can depend on FXExport and import the history-data module:
+FXBacktest reads historical M1 OHLC data only through the dedicated FXBacktest API v1. The API server runs inside FXExport, so FXExport remains the only process that knows ClickHouse credentials, database names, canonical table layout, readiness gates, and repair/verification rules.
 
-```swift
-import BacktestCore
-import ClickHouse
-import Domain
+Start the API from the resident FXExport prompt:
 
-let provider = ClickHouseHistoricalOhlcDataProvider(
-    client: clickHouseClient,
-    database: "fxexport"
-)
-let request = try HistoricalOhlcRequest(
-    brokerSourceId: try BrokerSourceId("icmarkets-sc-mt5-4"),
-    logicalSymbol: try LogicalSymbol("EURUSD"),
-    utcStartInclusive: UtcSecond(rawValue: 1_577_836_800),
-    utcEndExclusive: UtcSecond(rawValue: 1_735_689_600),
-    expectedMT5Symbol: try MT5Symbol("EURUSD"),
-    expectedDigits: try Digits(5),
-    maximumRows: 5_000_000
-)
-let series = try await provider.loadM1Ohlc(request)
+```text
+> fxbacktest-api --config-dir Config --api-host 127.0.0.1 --api-port 5066
 ```
 
-The provider is read-only. It first requires complete verified coverage for the requested UTC interval, and coverage must include the current SHA-256 chunk hash schema plus non-empty MT5 source, canonical readback, and offset-authority digests. It then queries `ohlc_m1_canonical`, rejects non-M1 rows, unexpected MT5 symbols when configured, non-verified UTC offsets, non-closed-bar source statuses, duplicate or unsorted UTC timestamps, mixed digits, stored bar-hash mismatches, invalid OHLC invariants, and over-large requests. It does not create local caches because verifier/repair agents may legitimately rewrite canonical ranges after MT5 source-of-truth checks. Let ClickHouse serve the current canonical state; add caches only after a coherent invalidation strategy exists.
-
-For Metal-capable external apps:
+The public SwiftPM product for clients is:
 
 ```swift
-import MetalAccel
-
-let buffers = try MetalBufferManager().makeReadOnlyBuffers(series: series)
+.product(name: "FXExportFXBacktestAPI", package: "MT5Research")
 ```
 
-The Metal helper only uploads verified OHLC columns into read-only shared buffers. It does not run strategy kernels or claim GPU results are correct.
+The client-side module contains only shared DTOs, the v1 constants, validation, and a small HTTP client. It does not expose ClickHouse, `BacktestCore`, FXExport's internal data provider, or Metal buffer helpers.
+
+API identity:
+
+| Field | Value |
+| --- | --- |
+| Version | `fxexport.fxbacktest.history.v1` |
+| Status | `GET /v1/status` |
+| M1 history | `POST /v1/history/m1` |
+| Transport | Local HTTP, default `http://127.0.0.1:5066` |
+
+Example history request:
+
+```json
+{
+  "api_version": "fxexport.fxbacktest.history.v1",
+  "broker_source_id": "icmarkets-sc-mt5-4",
+  "logical_symbol": "EURUSD",
+  "utc_start_inclusive": 1577836800,
+  "utc_end_exclusive": 1735689600,
+  "expected_mt5_symbol": "EURUSD",
+  "expected_digits": 5,
+  "maximum_rows": 5000000
+}
+```
+
+Example history response shape:
+
+```json
+{
+  "api_version": "fxexport.fxbacktest.history.v1",
+  "metadata": {
+    "broker_source_id": "icmarkets-sc-mt5-4",
+    "logical_symbol": "EURUSD",
+    "mt5_symbol": "EURUSD",
+    "timeframe": "M1",
+    "digits": 5,
+    "requested_utc_start": 1577836800,
+    "requested_utc_end_exclusive": 1735689600,
+    "first_utc": 1577836800,
+    "last_utc": 1735689540,
+    "row_count": 1000
+  },
+  "utc_timestamps": [1577836800],
+  "open": [108000],
+  "high": [108020],
+  "low": [107990],
+  "close": [108010]
+}
+```
+
+All OHLC arrays use scaled integer prices. The response validator rejects mismatched column lengths, non-M1 metadata, non-minute timestamps, timestamps outside the requested range, unsorted timestamps, invalid OHLC invariants, and mismatched first/last metadata.
+
+Server-side loading still uses FXExport's internal read-only ClickHouse-backed provider after the readiness gate passes. That internal provider is not a supported integration surface for FXBacktest. This prevents direct DB shortcuts and keeps API v1 as the single versioned contract between the projects.
 
 ## Production Supervisor Agents
 
@@ -514,8 +569,8 @@ Implemented:
 - `startcheck` go-live gate with ClickHouse checks, MetaEditor EA compile, MT5 terminal identity validation, verified broker UTC offset coverage, and `GET_RATES_FROM_POSITION` smoke testing.
 - Startup verifier checks plus random historical MT5-vs-ClickHouse range comparison.
 - Canonical-only repair command with verify -> repair -> reverify flow.
-- Read-only Swift history-data API using validated columnar arrays.
-- Optional Metal availability and OHLC buffer-preparation utility.
+- Dedicated FXBacktest API v1 with shared DTO/client module, local HTTP server, strict request/response validation, and readiness-gated M1 history loading.
+- Internal optional Metal availability and OHLC buffer-preparation utility for diagnostics.
 - MQL5 EA bridge skeleton.
 - XCTest coverage for critical domain/protocol/validation/time/checkpoint/history-data logic.
 
@@ -524,9 +579,9 @@ Intentionally not implemented in FXExport:
 - Local cache export. Caches can become stale after verifier/repair activity.
 - Strategy execution and EA-clone backtesting.
 - Long-running optimizer jobs.
-- Metal strategy kernels or parameter-sweep execution.
+- Metal strategy kernels or optimization-sweep execution.
 
-Those responsibilities belong in external Swift research applications that consume FXExport's read-only data API.
+Those responsibilities belong in FXBacktest or another external Swift research application that consumes the dedicated FXBacktest API v1.
 
 ## Data Integrity Rules
 

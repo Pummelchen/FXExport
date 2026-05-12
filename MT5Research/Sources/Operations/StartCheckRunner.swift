@@ -323,7 +323,7 @@ public enum StartCheckError: Error, CustomStringConvertible, Sendable {
 private enum StartCheckGuidance {
     static func guidance(for error: Error) -> String {
         if case StartCheckError.missingTables = error {
-            return "Next action: rerun `FXExport migrate --config-dir Config --migrations-dir Migrations`, then rerun `FXExport startcheck --config-dir Config`."
+            return "Next action: at the FXExport prompt run `migrate --config-dir Config --migrations-dir Migrations`, then run `startcheck --config-dir Config`."
         }
         if case StartCheckError.metaEditorNotFound = error {
             return "Next action: confirm `/Applications/MetaTrader 5.app` exists, or set MT5RESEARCH_WINE and MT5RESEARCH_METAEDITOR before running startcheck."

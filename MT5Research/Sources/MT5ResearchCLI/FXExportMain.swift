@@ -4,6 +4,7 @@ import ClickHouse
 import Config
 import Domain
 import Foundation
+import FXBacktestAPIServer
 import Ingestion
 import MetalAccel
 import MT5Bridge
@@ -15,12 +16,7 @@ import Verification
 struct MT5ResearchCLI {
     static func main() async {
         let arguments = Array(CommandLine.arguments.dropFirst())
-        let result: ExitCode
-        if InteractiveCommandSession.shouldStart(arguments: arguments) {
-            result = await InteractiveCommandSession(startupArguments: arguments).run()
-        } else {
-            result = await run(arguments: arguments)
-        }
+        let result = await InteractiveCommandSession(ignoredLaunchArguments: arguments).run()
         Darwin.exit(result.rawValue)
     }
 
@@ -31,9 +27,6 @@ struct MT5ResearchCLI {
             if options.command == .help {
                 printUsage()
                 return .success
-            }
-            if options.command == .interactive {
-                return await InteractiveCommandSession(startupArguments: arguments).run()
             }
             if options.command == .failureGuide {
                 print(OperationalFailureGuide.catalogText())
@@ -242,6 +235,17 @@ struct MT5ResearchCLI {
                 }
                 return .success
 
+            case .fxBacktestAPI:
+                let service = FXExportBacktestHistoryService(config: config, clickHouse: clickHouse)
+                let handler = FXBacktestAPIHTTPHandler(historyProvider: service)
+                try await FXBacktestAPIServer(
+                    host: options.apiHost,
+                    port: options.apiPort,
+                    handler: handler,
+                    logger: logger
+                ).run()
+                return .success
+
             case .backtest:
                 throw CLIError.commandUnavailable(options.command.unavailableReason ?? "Command unavailable.")
 
@@ -253,7 +257,8 @@ struct MT5ResearchCLI {
                 return .success
 
             case .interactive:
-                return await InteractiveCommandSession(startupArguments: arguments).run()
+                print("FXExport is already running in the interactive command shell.")
+                return .success
             }
         } catch let error as CLIError {
             print("[ERROR] \(error.description)")
@@ -658,11 +663,11 @@ struct MT5ResearchCLI {
 
     private static func printUsage() {
         print("""
-        FXExport [shell options]
-        FXExport <command> [options]
+        FXExport
 
-        Commands:
-          shell
+        Start FXExport without launch-time input, then type commands at the `>` prompt.
+
+        Interactive commands:
           migrate
           bridge-check
           symbol-check
@@ -676,18 +681,23 @@ struct MT5ResearchCLI {
           verify --random-ranges 20
           repair --symbol EURUSD --from 2020-01-01 --to 2020-02-01
           data-check --config Config/history_data.json
+          fxbacktest-api [--api-host 127.0.0.1] [--api-port 5066]
 
-        Global options:
+        Command options:
           --config-dir Config
           --migrations-dir Migrations
           --config Config/history_data.json   # data-check only
+          --api-host 127.0.0.1                # fxbacktest-api only
+          --api-port 5066                     # fxbacktest-api only
           --verbose
           --debug
 
-        Interactive shell:
-          Running FXExport without a command starts the resident prompt.
-          Type commands like `supervise --with-backfill` at `>` without restarting the app.
-          Type `status`, `stop`, `wait`, `help`, or `exit` for shell control.
+        Shell control commands:
+          status
+          stop
+          wait
+          help
+          exit
         """)
     }
 }
@@ -706,6 +716,7 @@ enum Command: Equatable {
     case repair
     case exportCache
     case dataCheck
+    case fxBacktestAPI
     case backtest
     case optimize
     case help
@@ -716,7 +727,7 @@ private extension Command {
         switch self {
         case .help, .interactive, .failureGuide, .symbolCheck, .exportCache, .backtest, .optimize:
             return false
-        case .migrate, .bridgeCheck, .backfill, .live, .supervise, .startcheck, .verify, .repair, .dataCheck:
+        case .migrate, .bridgeCheck, .backfill, .live, .supervise, .startcheck, .verify, .repair, .dataCheck, .fxBacktestAPI:
             return true
         }
     }
@@ -726,10 +737,10 @@ private extension Command {
         case .exportCache:
             return "export-cache is intentionally disabled. FXExport reads verified canonical bars directly from ClickHouse so stale local caches cannot survive verifier repairs."
         case .backtest:
-            return "backtest has been removed from FXExport. Use data-check to verify/load historical data, then run strategies in an external Swift app through the FXExportHistoryData API."
+            return "backtest has been removed from FXExport. Use fxbacktest-api to serve verified history, then run strategies in FXBacktest or another external Swift app through FXBacktest API v1."
         case .optimize:
             return "optimize has been removed from FXExport. Long-running optimization belongs in an external Swift app with its own durable job model; FXExport only serves verified OHLC data."
-        case .interactive, .migrate, .bridgeCheck, .symbolCheck, .backfill, .live, .supervise, .startcheck, .failureGuide, .verify, .repair, .dataCheck, .help:
+        case .interactive, .migrate, .bridgeCheck, .symbolCheck, .backfill, .live, .supervise, .startcheck, .failureGuide, .verify, .repair, .dataCheck, .fxBacktestAPI, .help:
             return nil
         }
     }
@@ -749,7 +760,7 @@ private struct MT5BridgeStartupError: Error, CustomStringConvertible {
               1. Check what owns the port: lsof -nP -iTCP:\(config.port) -sTCP:LISTEN
               2. Stop the other FXExport process, or change Config/mt5_bridge.json to another free port.
               3. Reattach FXExport with the same SwiftHost/SwiftPort values.
-              4. Rerun: FXExport startcheck --config-dir Config --migrations-dir Migrations
+              4. At the FXExport prompt run: startcheck --config-dir Config --migrations-dir Migrations
             """
         case .acceptTimedOut:
             return listenModeGuidance(reason: error.description)
@@ -762,7 +773,7 @@ private struct MT5BridgeStartupError: Error, CustomStringConvertible {
             Next steps:
               1. For local MT5/Wine, set host to 127.0.0.1.
               2. Keep the EA input SwiftHost exactly the same.
-              3. Rerun: FXExport startcheck --config-dir Config --migrations-dir Migrations
+              3. At the FXExport prompt run: startcheck --config-dir Config --migrations-dir Migrations
             """
         default:
             switch config.mode {
@@ -783,7 +794,7 @@ private struct MT5BridgeStartupError: Error, CustomStringConvertible {
           2. Attach the compiled FXExport EA to any chart.
           3. In the EA inputs set SwiftHost=\(config.host) and SwiftPort=\(config.port).
           4. Enable Algo Trading and allow localhost/socket access in MT5/Wine when prompted.
-          5. Leave this Swift command running while the EA connects, or rerun: FXExport startcheck --config-dir Config --migrations-dir Migrations
+          5. Leave this FXExport session running while the EA connects, or run at the prompt: startcheck --config-dir Config --migrations-dir Migrations
         """
     }
 
@@ -795,7 +806,7 @@ private struct MT5BridgeStartupError: Error, CustomStringConvertible {
           1. Confirm the MT5 EA bridge is already listening on \(config.host):\(config.port), or switch Config/mt5_bridge.json mode to "listen".
           2. Check the port: lsof -nP -iTCP:\(config.port)
           3. Confirm macOS/Wine firewall prompts are allowed.
-          4. Rerun: FXExport startcheck --config-dir Config --migrations-dir Migrations
+          4. At the FXExport prompt run: startcheck --config-dir Config --migrations-dir Migrations
         """
     }
 }
@@ -817,6 +828,8 @@ struct CLIOptions {
     let bridgeChecks: Bool
     let compileTimeoutSeconds: TimeInterval
     let commandConfigPath: URL?
+    let apiHost: String
+    let apiPort: UInt16
 
     init(arguments: [String]) throws {
         guard let first = arguments.first else {
@@ -836,6 +849,8 @@ struct CLIOptions {
             self.bridgeChecks = true
             self.compileTimeoutSeconds = 120
             self.commandConfigPath = nil
+            self.apiHost = "127.0.0.1"
+            self.apiPort = 5066
             return
         }
 
@@ -855,6 +870,8 @@ struct CLIOptions {
         var bridgeChecks = true
         var compileTimeoutSeconds: TimeInterval = 120
         var commandConfigPath: URL?
+        var apiHost = "127.0.0.1"
+        var apiPort: UInt16 = 5066
 
         var index = 1
         while index < arguments.count {
@@ -920,6 +937,16 @@ struct CLIOptions {
                 index += 1
                 guard index < arguments.count else { throw CLIError.missingValue(arg) }
                 commandConfigPath = URL(fileURLWithPath: arguments[index])
+            case "--api-host":
+                index += 1
+                guard index < arguments.count else { throw CLIError.missingValue(arg) }
+                apiHost = arguments[index]
+            case "--api-port":
+                index += 1
+                guard index < arguments.count, let value = UInt16(arguments[index]), value > 0 else {
+                    throw CLIError.invalidValue(arg)
+                }
+                apiPort = value
             default:
                 throw CLIError.unknownOption(arg)
             }
@@ -931,6 +958,9 @@ struct CLIOptions {
         }
         if commandConfigPath != nil && command != .dataCheck && command != .backtest && command != .optimize {
             throw CLIError.invalidValue("--config")
+        }
+        if (apiHost != "127.0.0.1" || apiPort != 5066) && command != .fxBacktestAPI {
+            throw CLIError.invalidValue("--api-host/--api-port")
         }
 
         self.configDirectory = configDirectory
@@ -948,6 +978,8 @@ struct CLIOptions {
         self.bridgeChecks = bridgeChecks
         self.compileTimeoutSeconds = compileTimeoutSeconds
         self.commandConfigPath = commandConfigPath
+        self.apiHost = apiHost
+        self.apiPort = apiPort
     }
 
     private static func parseCommand(_ value: String) throws -> Command {
@@ -965,6 +997,7 @@ struct CLIOptions {
         case "repair": return .repair
         case "export-cache": return .exportCache
         case "data-check": return .dataCheck
+        case "fxbacktest-api": return .fxBacktestAPI
         case "backtest": return .backtest
         case "optimize": return .optimize
         case "help", "--help", "-h": return .help
