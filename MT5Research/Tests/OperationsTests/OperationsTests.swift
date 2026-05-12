@@ -106,6 +106,105 @@ final class OperationsTests: XCTestCase {
         XCTAssertFalse(bundle.app.logging.fileLoggingEnabled)
     }
 
+    func testConfigLoaderRejectsInsecureRemoteClickHouseHTTPByDefault() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FXExport-remote-http-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try writeMinimalConfigFiles(
+            directory: directory,
+            clickHouseJSON: """
+            {
+              "url": "http://clickhouse.example.com:8123",
+              "database": "db",
+              "username": "default",
+              "password": null,
+              "requestTimeoutSeconds": 10,
+              "retryCount": 0
+            }
+            """
+        )
+
+        XCTAssertThrowsError(try ConfigLoader().loadBundle(configDirectory: directory)) { error in
+            XCTAssertTrue(String(describing: error).contains("Remote ClickHouse endpoints must use https"))
+        }
+    }
+
+    func testConfigLoaderAllowsExplicitPrivateTunnelHTTPAndDefaultsRemoteSafetyFields() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FXExport-private-http-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try writeMinimalConfigFiles(
+            directory: directory,
+            clickHouseJSON: """
+            {
+              "url": "http://clickhouse.example.com:8123",
+              "database": "db",
+              "username": "default",
+              "password": null,
+              "requestTimeoutSeconds": 10,
+              "retryCount": 0,
+              "allowInsecureRemoteHTTP": true
+            }
+            """
+        )
+
+        let bundle = try ConfigLoader().loadBundle(configDirectory: directory)
+        XCTAssertTrue(bundle.clickHouse.allowInsecureRemoteHTTP)
+        XCTAssertTrue(bundle.clickHouse.waitEndOfQuery)
+        XCTAssertEqual(bundle.clickHouse.queryIdPrefix, "fxexport")
+    }
+
+    func testConfigLoaderRejectsCredentialsEmbeddedInClickHouseURL() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FXExport-url-credential-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try writeMinimalConfigFiles(
+            directory: directory,
+            clickHouseJSON: """
+            {
+              "url": "http://default:secret@localhost:8123",
+              "database": "db",
+              "username": null,
+              "password": null,
+              "requestTimeoutSeconds": 10,
+              "retryCount": 0
+            }
+            """
+        )
+
+        XCTAssertThrowsError(try ConfigLoader().loadBundle(configDirectory: directory)) { error in
+            XCTAssertTrue(String(describing: error).contains("credentials must be configured with username/password fields"))
+        }
+    }
+
+    func testConfigLoaderRejectsNonASCIIClickHouseQueryIdPrefix() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FXExport-query-id-prefix-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try writeMinimalConfigFiles(
+            directory: directory,
+            clickHouseJSON: """
+            {
+              "url": "http://localhost:8123",
+              "database": "db",
+              "username": "default",
+              "password": null,
+              "requestTimeoutSeconds": 10,
+              "retryCount": 0,
+              "queryIdPrefix": "fxexportå"
+            }
+            """
+        )
+
+        XCTAssertThrowsError(try ConfigLoader().loadBundle(configDirectory: directory)) { error in
+            XCTAssertTrue(String(describing: error).contains("queryIdPrefix may contain only ASCII"))
+        }
+    }
+
     func testPersistentLogSinkWritesJSONAndRotates() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("FXExport-log-test-\(UUID().uuidString)", isDirectory: true)
@@ -889,6 +988,41 @@ private func makeConfig(
 private func writeConfig(_ text: String, name: String, directory: URL) throws {
     let data = try XCTUnwrap(text.data(using: .utf8))
     try data.write(to: directory.appendingPathComponent(name))
+}
+
+private func writeMinimalConfigFiles(directory: URL, clickHouseJSON: String) throws {
+    try writeConfig("""
+    {
+      "chunk_size": 50000,
+      "live_scan_interval_seconds": 10,
+      "log_level": "normal",
+      "strict_symbol_failures": false,
+      "verifier_random_ranges": 0
+    }
+    """, name: "app.json", directory: directory)
+    try writeConfig(clickHouseJSON, name: "clickhouse.json", directory: directory)
+    try writeConfig("""
+    {
+      "mode": "listen",
+      "host": "127.0.0.1",
+      "port": 5055,
+      "connectTimeoutSeconds": 10,
+      "requestTimeoutSeconds": 10
+    }
+    """, name: "mt5_bridge.json", directory: directory)
+    try writeConfig("""
+    {
+      "broker_source_id": "demo",
+      "accepted_live_offset_seconds": [7200, 10800]
+    }
+    """, name: "broker_time.json", directory: directory)
+    try writeConfig("""
+    {
+      "symbols": [
+        { "logical_symbol": "EURUSD", "mt5_symbol": "EURUSD", "digits": 5 }
+      ]
+    }
+    """, name: "symbols.json", directory: directory)
 }
 
 private func XCTAssertThrowsErrorAsync<T>(

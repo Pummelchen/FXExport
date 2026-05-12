@@ -101,6 +101,24 @@ public struct ConfigLoader: Sendable {
         guard clickHouse.url.scheme == "http" || clickHouse.url.scheme == "https" else {
             throw ConfigError.invalidValue("ClickHouse URL must use http or https")
         }
+        guard !Self.urlContainsCredentials(clickHouse.url) else {
+            throw ConfigError.invalidValue("ClickHouse credentials must be configured with username/password fields, not embedded in the URL")
+        }
+        guard !Self.urlContainsCredentialQueryItems(clickHouse.url) else {
+            throw ConfigError.invalidValue("ClickHouse URL query must not contain credential fields")
+        }
+        if clickHouse.usesInsecureRemoteHTTP && !clickHouse.allowInsecureRemoteHTTP {
+            throw ConfigError.invalidValue("Remote ClickHouse endpoints must use https. Set allowInsecureRemoteHTTP only for an explicitly accepted private tunnel.")
+        }
+        guard !clickHouse.queryIdPrefix.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ConfigError.invalidValue("ClickHouse queryIdPrefix must not be empty")
+        }
+        guard clickHouse.queryIdPrefix.utf8.count <= 64 else {
+            throw ConfigError.invalidValue("ClickHouse queryIdPrefix must be 64 bytes or shorter")
+        }
+        guard Self.isSafeQueryIdPrefix(clickHouse.queryIdPrefix) else {
+            throw ConfigError.invalidValue("ClickHouse queryIdPrefix may contain only ASCII letters, digits, '-' and '_'")
+        }
         guard Self.isReasonableTimeout(clickHouse.requestTimeoutSeconds) else {
             throw ConfigError.invalidValue("ClickHouse requestTimeoutSeconds must be finite and between 0 and 3600 seconds")
         }
@@ -172,6 +190,30 @@ public struct ConfigLoader: Sendable {
         guard let first = value.first, first == "_" || first.isLetter else { return false }
         return value.allSatisfy { character in
             character == "_" || character.isLetter || character.isNumber
+        }
+    }
+
+    private static func urlContainsCredentials(_ url: URL) -> Bool {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return false }
+        return components.user != nil || components.password != nil
+    }
+
+    private static func urlContainsCredentialQueryItems(_ url: URL) -> Bool {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let queryItems = components.queryItems else { return false }
+        let blocked = Set(["user", "username", "password", "passwd"])
+        return queryItems.contains { item in
+            blocked.contains(item.name.lowercased())
+        }
+    }
+
+    private static func isSafeQueryIdPrefix(_ value: String) -> Bool {
+        value.utf8.allSatisfy { byte in
+            (byte >= 48 && byte <= 57) ||
+            (byte >= 65 && byte <= 90) ||
+            (byte >= 97 && byte <= 122) ||
+            byte == 45 ||
+            byte == 95
         }
     }
 

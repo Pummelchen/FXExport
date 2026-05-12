@@ -1,4 +1,5 @@
 @testable import ClickHouse
+import Config
 import Domain
 import XCTest
 
@@ -14,6 +15,41 @@ final class ClickHouseTests: XCTestCase {
         XCTAssertEqual(header, "Basic ZGVmYXVsdDpzZWNyZXQ=")
         XCTAssertNil(ClickHouseHTTPClient.basicAuthorization(username: nil, password: "secret"))
         XCTAssertNil(ClickHouseHTTPClient.basicAuthorization(username: "", password: "secret"))
+    }
+
+    func testClickHouseQueryIdIsTraceableAndSanitized() throws {
+        let id = ClickHouseHTTPClient.queryId(
+            prefix: "fx export!å",
+            attempt: 2,
+            uuid: try XCTUnwrap(UUID(uuidString: "00000000-0000-0000-0000-000000000001"))
+        )
+        XCTAssertEqual(id, "fxexport-00000000-0000-0000-0000-000000000001-a2")
+    }
+
+    func testClickHouseRequestURLIncludesSafetySettings() throws {
+        let config = ClickHouseConfig(
+            url: try XCTUnwrap(URL(string: "https://clickhouse.example.com:8443")),
+            database: "fxexport",
+            username: "default",
+            password: nil,
+            requestTimeoutSeconds: 60,
+            retryCount: 2,
+            allowInsecureRemoteHTTP: false,
+            waitEndOfQuery: true,
+            queryIdPrefix: "fxexport"
+        )
+        let url = try ClickHouseHTTPClient.requestURL(
+            config: config,
+            query: .select("SELECT 1"),
+            queryID: "fxexport-test-a1"
+        )
+        let components = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
+        let queryItems = try XCTUnwrap(components.queryItems)
+        let items = Dictionary(uniqueKeysWithValues: queryItems.map { ($0.name, $0.value ?? "") })
+        XCTAssertEqual(items["database"], "fxexport")
+        XCTAssertEqual(items["wait_end_of_query"], "1")
+        XCTAssertEqual(items["send_progress_in_http_headers"], "0")
+        XCTAssertEqual(items["query_id"], "fxexport-test-a1")
     }
 
     func testCanonicalRangeDeleteIsBrokerScopedAndSynchronous() throws {

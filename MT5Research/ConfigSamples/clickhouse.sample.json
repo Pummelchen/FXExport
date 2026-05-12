@@ -4,5 +4,8 @@
   "username": null,
   "password": null,
   "requestTimeoutSeconds": 60,
-  "retryCount": 2
+  "retryCount": 2,
+  "allowInsecureRemoteHTTP": false,
+  "waitEndOfQuery": true,
+  "queryIdPrefix": "fxexport"
 }
