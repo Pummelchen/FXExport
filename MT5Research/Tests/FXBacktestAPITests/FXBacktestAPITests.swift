@@ -20,6 +20,20 @@ final class FXBacktestAPITests: XCTestCase {
             utcStartInclusive: 1_704_067_201,
             utcEndExclusive: 1_704_067_260
         ).validate())
+
+        XCTAssertThrowsError(try FXBacktestM1HistoryRequest(
+            brokerSourceId: "demo",
+            logicalSymbol: "EURUSD",
+            utcStartInclusive: 1_704_067_200,
+            utcEndExclusive: 1_704_067_260,
+            maximumRows: FXBacktestAPIV1.maximumRowsLimit + 1
+        ).validate()) { error in
+            guard case .invalidField(let message) = error as? FXBacktestAPIValidationError else {
+                XCTFail("Expected invalidField, got \(error)")
+                return
+            }
+            XCTAssertTrue(message.contains("maximum_rows"))
+        }
     }
 
     func testHTTPHandlerServesStatusAndHistoryWithV1Envelope() async throws {

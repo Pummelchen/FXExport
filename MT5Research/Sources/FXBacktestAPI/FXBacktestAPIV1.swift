@@ -4,6 +4,7 @@ public enum FXBacktestAPIV1 {
     public static let version = "fxexport.fxbacktest.history.v1"
     public static let statusPath = "/v1/status"
     public static let m1HistoryPath = "/v1/history/m1"
+    public static let maximumRowsLimit = 5_000_000
 }
 
 public struct FXBacktestAPIStatusResponse: Codable, Equatable, Sendable {
@@ -94,6 +95,9 @@ public struct FXBacktestM1HistoryRequest: Codable, Equatable, Sendable {
         if let maximumRows {
             guard maximumRows > 0 else {
                 throw FXBacktestAPIValidationError.invalidField("maximum_rows must be positive when supplied")
+            }
+            guard maximumRows <= FXBacktestAPIV1.maximumRowsLimit else {
+                throw FXBacktestAPIValidationError.invalidField("maximum_rows must not exceed \(FXBacktestAPIV1.maximumRowsLimit)")
             }
         }
     }

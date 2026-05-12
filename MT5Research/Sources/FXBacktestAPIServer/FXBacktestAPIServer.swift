@@ -7,12 +7,20 @@ public final class FXBacktestAPIServer: @unchecked Sendable {
     private let port: UInt16
     private let handler: FXBacktestAPIHTTPHandler
     private let logger: Logger
+    private let clientSocketTimeoutSeconds: Double
 
-    public init(host: String, port: UInt16, handler: FXBacktestAPIHTTPHandler, logger: Logger) {
+    public init(
+        host: String,
+        port: UInt16,
+        handler: FXBacktestAPIHTTPHandler,
+        logger: Logger,
+        clientSocketTimeoutSeconds: Double = 30
+    ) {
         self.host = host
         self.port = port
         self.handler = handler
         self.logger = logger
+        self.clientSocketTimeoutSeconds = clientSocketTimeoutSeconds
     }
 
     public func run() async throws {
@@ -36,6 +44,13 @@ public final class FXBacktestAPIServer: @unchecked Sendable {
                 if errno == EINTR { continue }
                 throw FXBacktestAPIServerError.acceptFailed(errno: errno)
             }
+            do {
+                try configureClientSocket(clientFD)
+            } catch {
+                Darwin.close(clientFD)
+                logger.warn("FXBacktest API rejected client socket: \(error)")
+                continue
+            }
             Task.detached(priority: .userInitiated) {
                 await self.handle(clientFD: clientFD)
             }
@@ -52,7 +67,11 @@ public final class FXBacktestAPIServer: @unchecked Sendable {
         } catch {
             let body = #"{"api_version":"fxexport.fxbacktest.history.v1","error":{"code":"bad_http_request","message":"\#(Self.jsonEscaped(String(describing: error)))"}}"#
             let response = FXBacktestHTTPResponse(statusCode: 400, body: Data(body.utf8))
-            try? writeResponse(response, clientFD: clientFD)
+            do {
+                try writeResponse(response, clientFD: clientFD)
+            } catch {
+                logger.warn("FXBacktest API could not write error response: \(error)")
+            }
         }
     }
 
@@ -90,6 +109,26 @@ public final class FXBacktestAPIServer: @unchecked Sendable {
         return fd
     }
 
+    private func configureClientSocket(_ fd: Int32) throws {
+        var noSigPipe: Int32 = 1
+        _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
+
+        guard clientSocketTimeoutSeconds.isFinite,
+              clientSocketTimeoutSeconds > 0,
+              clientSocketTimeoutSeconds <= 3_600 else {
+            throw FXBacktestAPIServerError.invalidTimeout(clientSocketTimeoutSeconds)
+        }
+        let seconds = Int(clientSocketTimeoutSeconds)
+        let microseconds = Int((clientSocketTimeoutSeconds - Double(seconds)) * 1_000_000)
+        var timeout = timeval(tv_sec: seconds, tv_usec: Int32(microseconds))
+        guard setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size)) == 0 else {
+            throw FXBacktestAPIServerError.socketOptionFailed(option: "SO_RCVTIMEO", errno: errno)
+        }
+        guard setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size)) == 0 else {
+            throw FXBacktestAPIServerError.socketOptionFailed(option: "SO_SNDTIMEO", errno: errno)
+        }
+    }
+
     private func readRequest(clientFD: Int32) throws -> ParsedHTTPRequest {
         var data = Data()
         let maxRequestBytes = 1_048_576
@@ -100,6 +139,9 @@ public final class FXBacktestAPIServer: @unchecked Sendable {
             let bytesRead = Darwin.recv(clientFD, &buffer, buffer.count, 0)
             if bytesRead < 0 {
                 if errno == EINTR { continue }
+                if errno == EAGAIN || errno == EWOULDBLOCK {
+                    throw FXBacktestAPIServerError.requestTimedOut
+                }
                 throw FXBacktestAPIServerError.readFailed(errno: errno)
             }
             guard bytesRead > 0 else {
@@ -108,6 +150,9 @@ public final class FXBacktestAPIServer: @unchecked Sendable {
             data.append(contentsOf: buffer.prefix(bytesRead))
 
             if expectedLength == nil, let parsedLength = try parseExpectedLength(data) {
+                guard parsedLength <= maxRequestBytes else {
+                    throw FXBacktestAPIServerError.requestTooLarge
+                }
                 expectedLength = parsedLength
             }
             if let expectedLength, data.count >= expectedLength {
@@ -190,7 +235,13 @@ public final class FXBacktestAPIServer: @unchecked Sendable {
                 let result = Darwin.send(clientFD, base.advanced(by: written), bytes.count - written, 0)
                 if result < 0 {
                     if errno == EINTR { continue }
+                    if errno == EAGAIN || errno == EWOULDBLOCK {
+                        throw FXBacktestAPIServerError.requestTimedOut
+                    }
                     throw FXBacktestAPIServerError.writeFailed(errno: errno)
+                }
+                guard result > 0 else {
+                    throw FXBacktestAPIServerError.connectionClosed
                 }
                 written += result
             }
@@ -210,9 +261,24 @@ public final class FXBacktestAPIServer: @unchecked Sendable {
     }
 
     private static func jsonEscaped(_ value: String) -> String {
-        let data = try? JSONEncoder().encode(value)
-        let encoded = data.flatMap { String(data: $0, encoding: .utf8) } ?? #""""#
-        return String(encoded.dropFirst().dropLast())
+        do {
+            let data = try JSONEncoder().encode(value)
+            guard let encoded = String(data: data, encoding: .utf8), encoded.count >= 2 else {
+                return fallbackJSONStringContent(value)
+            }
+            return String(encoded.dropFirst().dropLast())
+        } catch {
+            return fallbackJSONStringContent(value)
+        }
+    }
+
+    private static func fallbackJSONStringContent(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "\\r")
+            .replacingOccurrences(of: "\t", with: "\\t")
     }
 }
 
@@ -244,9 +310,12 @@ public enum FXBacktestAPIServerError: Error, CustomStringConvertible, Sendable {
     case bindFailed(errno: Int32)
     case listenFailed(errno: Int32)
     case acceptFailed(errno: Int32)
+    case socketOptionFailed(option: String, errno: Int32)
+    case invalidTimeout(Double)
     case readFailed(errno: Int32)
     case writeFailed(errno: Int32)
     case connectionClosed
+    case requestTimedOut
     case requestTooLarge
     case invalidRequest(String)
 
@@ -262,12 +331,18 @@ public enum FXBacktestAPIServerError: Error, CustomStringConvertible, Sendable {
             return "FXBacktest API listen failed with errno \(errno)."
         case .acceptFailed(let errno):
             return "FXBacktest API accept failed with errno \(errno)."
+        case .socketOptionFailed(let option, let errno):
+            return "FXBacktest API socket option \(option) failed with errno \(errno)."
+        case .invalidTimeout(let timeout):
+            return "FXBacktest API client socket timeout \(timeout) is invalid."
         case .readFailed(let errno):
             return "FXBacktest API read failed with errno \(errno)."
         case .writeFailed(let errno):
             return "FXBacktest API write failed with errno \(errno)."
         case .connectionClosed:
             return "FXBacktest API client closed the connection before sending a full request."
+        case .requestTimedOut:
+            return "FXBacktest API client socket timed out."
         case .requestTooLarge:
             return "FXBacktest API request exceeded 1 MiB."
         case .invalidRequest(let reason):

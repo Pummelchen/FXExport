@@ -14,6 +14,7 @@ public struct FXBacktestAPIClient: Sendable {
     public func status() async throws -> FXBacktestAPIStatusResponse {
         var request = URLRequest(url: try endpoint(FXBacktestAPIV1.statusPath))
         request.httpMethod = "GET"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
         let data = try await perform(request)
         let response = try JSONDecoder().decode(FXBacktestAPIStatusResponse.self, from: data)
         guard response.apiVersion == FXBacktestAPIV1.version else {
@@ -61,11 +62,17 @@ public struct FXBacktestAPIClient: Sendable {
             throw FXBacktestAPIClientError.invalidResponse("Response was not HTTP.")
         }
         guard (200..<300).contains(httpResponse.statusCode) else {
-            if let errorResponse = try? JSONDecoder().decode(FXBacktestAPIErrorResponse.self, from: data) {
-                throw FXBacktestAPIClientError.server(code: errorResponse.error.code, message: errorResponse.error.message)
+            let errorResponse: FXBacktestAPIErrorResponse
+            do {
+                errorResponse = try JSONDecoder().decode(FXBacktestAPIErrorResponse.self, from: data)
+            } catch {
+                let body = String(data: data, encoding: .utf8) ?? ""
+                let detail = body.isEmpty
+                    ? "Could not decode FXExport API error response: \(error)"
+                    : "\(body) (could not decode FXExport API error response: \(error))"
+                throw FXBacktestAPIClientError.httpStatus(httpResponse.statusCode, detail)
             }
-            let body = String(data: data, encoding: .utf8) ?? ""
-            throw FXBacktestAPIClientError.httpStatus(httpResponse.statusCode, body)
+            throw FXBacktestAPIClientError.server(code: errorResponse.error.code, message: errorResponse.error.message)
         }
         return data
     }

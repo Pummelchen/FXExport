@@ -513,7 +513,7 @@ Example history response shape:
 }
 ```
 
-All OHLC arrays use scaled integer prices. The response validator rejects mismatched column lengths, non-M1 metadata, non-minute timestamps, timestamps outside the requested range, unsorted timestamps, invalid OHLC invariants, and mismatched first/last metadata.
+All OHLC arrays use scaled integer prices. The request validator rejects `maximum_rows` values above 5,000,000 so clients must split larger ranges. The response validator rejects mismatched column lengths, non-M1 metadata, non-minute timestamps, timestamps outside the requested range, unsorted timestamps, invalid OHLC invariants, and mismatched first/last metadata.
 
 Server-side loading still uses FXExport's internal read-only ClickHouse-backed provider after the readiness gate passes. That internal provider is not a supported integration surface for FXBacktest. This prevents direct DB shortcuts and keeps API v1 as the single versioned contract between the projects.
 
