@@ -7,8 +7,6 @@ let package = Package(
         .macOS(.v13)
     ],
     products: [
-        .library(name: "FXExportHistoryData", targets: ["BacktestCore"]),
-        .library(name: "FXExportMetalData", targets: ["MetalAccel"]),
         .library(name: "FXExportFXBacktestAPI", targets: ["FXBacktestAPI"]),
         .executable(name: "FXExport", targets: ["MT5ResearchCLI"])
     ],
