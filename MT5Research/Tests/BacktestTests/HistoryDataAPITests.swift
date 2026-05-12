@@ -68,6 +68,22 @@ final class HistoryDataAPITests: XCTestCase {
         }
     }
 
+    func testClickHouseProviderRejectsMissingVerifiedCoverage() async throws {
+        let client = MockHistoryClickHouse(
+            body: try historyRow(utc: 1_577_836_800, mt5: 1_577_844_000, open: 108_342, high: 108_360, low: 108_300, close: 108_350),
+            coverageBody: ""
+        )
+        let provider = ClickHouseHistoricalOhlcDataProvider(client: client, database: "fx")
+
+        await XCTAssertThrowsErrorAsync(try await provider.loadM1Ohlc(try self.request())) { error in
+            guard case HistoryDataError.missingVerifiedCoverage = error else {
+                XCTFail("Expected missingVerifiedCoverage, got \(error)")
+                return
+            }
+        }
+    }
+
+
     func testClickHouseProviderRejectsDuplicateUtcRows() async throws {
         let row = try historyRow(utc: 1_577_836_800, mt5: 1_577_844_000, open: 108_342, high: 108_360, low: 108_300, close: 108_350)
         let client = MockHistoryClickHouse(body: [row, row].joined(separator: "\n"))
@@ -194,14 +210,19 @@ private func historyRow(
 
 private actor MockHistoryClickHouse: ClickHouseClientProtocol {
     private let body: String
+    private let coverageBody: String
     private var sql: String = ""
 
-    init(body: String) {
+    init(body: String, coverageBody: String = "1577836800\t1577836920\n") {
         self.body = body
+        self.coverageBody = coverageBody
     }
 
     func execute(_ query: ClickHouseQuery) async throws -> String {
         sql = query.sql
+        if query.sql.contains("ohlc_m1_verified_coverage") {
+            return coverageBody
+        }
         return body
     }
 

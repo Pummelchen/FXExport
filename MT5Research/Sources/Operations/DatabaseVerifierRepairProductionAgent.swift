@@ -91,12 +91,15 @@ public struct DatabaseVerifierRepairProductionAgent: ProductionAgent {
                 let decision = RepairPolicy().decide(
                     verification: outcome.result,
                     mt5Available: !outcome.mt5Bars.isEmpty,
+                    sourceComplete: outcome.sourceComplete,
                     utcMappingAmbiguous: false
                 )
                 try await repairAgent.repairCanonicalRange(
                     range: range,
                     replacementBars: outcome.mt5Bars,
-                    decision: decision
+                    decision: decision,
+                    sourceComplete: outcome.sourceComplete,
+                    verifiedCoverage: outcome.verifiedCoverage
                 )
                 if case .repairCanonicalOnly = decision {
                     let recheck = try await verifier.verify(range: range)

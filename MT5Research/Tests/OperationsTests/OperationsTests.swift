@@ -545,6 +545,42 @@ final class OperationsTests: XCTestCase {
         }
     }
 
+    func testBacktestReadinessGateBlocksUnfinishedIngestOperation() async throws {
+        let config = try makeConfig()
+        let clickHouse = BacktestGateClickHouse(mode: .unfinishedIngestOperation)
+        let gate = BacktestReadinessGate(config: config, clickHouse: clickHouse)
+
+        await XCTAssertThrowsErrorAsync(try await gate.assertReady(BacktestReadinessRequest(
+            brokerSourceId: config.brokerTime.brokerSourceId,
+            logicalSymbol: try LogicalSymbol("EURUSD"),
+            utcStart: UtcSecond(rawValue: 60),
+            utcEndExclusive: UtcSecond(rawValue: 120)
+        ))) { error in
+            guard case BacktestReadinessError.unfinishedIngestOperations = error else {
+                XCTFail("Expected unfinishedIngestOperations, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testBacktestReadinessGateBlocksMissingVerifiedCoverage() async throws {
+        let config = try makeConfig()
+        let clickHouse = BacktestGateClickHouse(mode: .missingVerifiedCoverage)
+        let gate = BacktestReadinessGate(config: config, clickHouse: clickHouse)
+
+        await XCTAssertThrowsErrorAsync(try await gate.assertReady(BacktestReadinessRequest(
+            brokerSourceId: config.brokerTime.brokerSourceId,
+            logicalSymbol: try LogicalSymbol("EURUSD"),
+            utcStart: UtcSecond(rawValue: 60),
+            utcEndExclusive: UtcSecond(rawValue: 120)
+        ))) { error in
+            guard case BacktestReadinessError.missingVerifiedCoverage = error else {
+                XCTFail("Expected missingVerifiedCoverage, got \(error)")
+                return
+            }
+        }
+    }
+
     func testCheckpointGapAuditWarnsOnMissingConfiguredCheckpoints() async throws {
         let config = try makeConfig()
         let clickHouse = CheckpointAuditClickHouse(mode: .missingUSDJPYCheckpoint)
@@ -639,6 +675,8 @@ private enum BacktestGateMode {
     case interruptedBackfill
     case failedAgentState
     case missingRequiredAgentState
+    case unfinishedIngestOperation
+    case missingVerifiedCoverage
 }
 
 private enum CheckpointAuditMode {
@@ -680,6 +718,12 @@ private actor BacktestGateClickHouse: ClickHouseClientProtocol {
 
             """
         }
+        if sql.contains("FROM db.ingest_operations") {
+            return mode == .unfinishedIngestOperation ? "1\n" : "0\n"
+        }
+        if sql.contains("FROM db.ohlc_m1_verified_coverage") {
+            return mode == .missingVerifiedCoverage ? "" : "60\t120\n"
+        }
         if sql.contains("ohlc_m1_canonical") && sql.contains("ts_utc >= 60") && sql.contains("ts_utc < 120") {
             return "10\n"
         }
@@ -708,6 +752,9 @@ private actor CheckpointAuditClickHouse: ClickHouseClientProtocol {
             return ""
         }
         if sql.contains("ohlc_m1_canonical") {
+            return "1\n"
+        }
+        if sql.contains("ohlc_m1_verified_coverage") {
             return "1\n"
         }
         return "0\n"

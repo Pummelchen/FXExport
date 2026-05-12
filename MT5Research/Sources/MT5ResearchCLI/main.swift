@@ -606,12 +606,15 @@ struct MT5ResearchCLI {
             let decision = policy.decide(
                 verification: outcome.result,
                 mt5Available: !outcome.mt5Bars.isEmpty,
+                sourceComplete: outcome.sourceComplete,
                 utcMappingAmbiguous: false
             )
             try await repairAgent.repairCanonicalRange(
                 range: range,
                 replacementBars: outcome.mt5Bars,
-                decision: decision
+                decision: decision,
+                sourceComplete: outcome.sourceComplete,
+                verifiedCoverage: outcome.verifiedCoverage
             )
             if case .noRepairNeeded = decision {
                 continue

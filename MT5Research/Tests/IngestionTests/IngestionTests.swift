@@ -1,7 +1,9 @@
 import ClickHouse
 import Domain
+import Foundation
 import Ingestion
 import MT5Bridge
+import TimeMapping
 import XCTest
 
 final class IngestionTests: XCTestCase {
@@ -176,6 +178,131 @@ final class IngestionTests: XCTestCase {
         XCTAssertTrue(queries[1].contains(bar.barHash.description))
         XCTAssertTrue(queries[1].contains("\t999\tbatch"))
     }
+
+    func testMT5SourceRangeVerifierAcceptsStableManifestedRange() async throws {
+        let response = try ratesResponse(
+            from: 120,
+            toExclusive: 240,
+            emitted: [
+                (120, "1.10000"),
+                (180, "1.10010")
+            ]
+        )
+        let verifier = MT5SourceRangeVerifier(confirmationDelayNanoseconds: 0, retryDelayNanoseconds: 0)
+        var responses = [response, response]
+
+        let stable = try await verifier.fetchStableRange(
+            mt5Symbol: try MT5Symbol("EURUSD"),
+            from: MT5ServerSecond(rawValue: 120),
+            toExclusive: MT5ServerSecond(rawValue: 240),
+            maxBars: 2
+        ) {
+            responses.removeFirst()
+        }
+
+        XCTAssertEqual(stable.manifest.emittedCount, 2)
+        XCTAssertEqual(stable.response.rates.count, 2)
+        XCTAssertTrue(stable.sourceHash.hasPrefix("fnv64:"))
+    }
+
+    func testMT5SourceRangeVerifierRejectsUnstableConfirmationRead() async throws {
+        let first = try ratesResponse(
+            from: 120,
+            toExclusive: 240,
+            emitted: [(120, "1.10000")]
+        )
+        let second = try ratesResponse(
+            from: 120,
+            toExclusive: 240,
+            emitted: [(120, "1.10001")]
+        )
+        let verifier = MT5SourceRangeVerifier(maxAttempts: 1, confirmationDelayNanoseconds: 0, retryDelayNanoseconds: 0)
+        var responses = [first, second]
+
+        await XCTAssertThrowsErrorAsync(try await verifier.fetchStableRange(
+            mt5Symbol: try MT5Symbol("EURUSD"),
+            from: MT5ServerSecond(rawValue: 120),
+            toExclusive: MT5ServerSecond(rawValue: 240),
+            maxBars: 2,
+            request: {
+            responses.removeFirst()
+            }
+        )) { error in
+            XCTAssertTrue(String(describing: error).contains("not stable"))
+        }
+    }
+
+    func testMT5SourceRangeVerifierRejectsMissingManifest() throws {
+        let data = """
+        {"mt5_symbol":"EURUSD","timeframe":"M1","rates":[]}
+        """.data(using: .utf8)!
+        let response = try JSONDecoder().decode(RatesResponseDTO.self, from: data)
+
+        XCTAssertThrowsError(try MT5SourceRangeVerifier().validate(
+            response,
+            expectedMT5Symbol: try MT5Symbol("EURUSD"),
+            from: MT5ServerSecond(rawValue: 120),
+            toExclusive: MT5ServerSecond(rawValue: 240),
+            maxBars: 2
+        ))
+    }
+
+    func testCoverageBuilderSplitsAtBrokerOffsetBoundary() throws {
+        let broker = try BrokerSourceId("demo")
+        let identity = try BrokerServerIdentity(company: "Broker Ltd", server: "Broker-Server", accountLogin: 1)
+        let map = try BrokerOffsetMap(
+            brokerSourceId: broker,
+            terminalIdentity: identity,
+            segments: [
+                BrokerOffsetSegment(
+                    brokerSourceId: broker,
+                    terminalIdentity: identity,
+                    validFrom: MT5ServerSecond(rawValue: 0),
+                    validTo: MT5ServerSecond(rawValue: 180),
+                    offset: OffsetSeconds(rawValue: 60),
+                    source: .manual,
+                    confidence: .verified
+                ),
+                BrokerOffsetSegment(
+                    brokerSourceId: broker,
+                    terminalIdentity: identity,
+                    validFrom: MT5ServerSecond(rawValue: 180),
+                    validTo: MT5ServerSecond(rawValue: 360),
+                    offset: OffsetSeconds(rawValue: 120),
+                    source: .manual,
+                    confidence: .verified
+                )
+            ]
+        )
+        let rates = try ratesResponse(
+            from: 120,
+            toExclusive: 300,
+            emitted: [(120, "1.10000"), (180, "1.10010"), (240, "1.10020")]
+        ).rates
+        let records = try CoverageRangeBuilder(offsetMap: map).makeRecords(
+            brokerSourceId: broker,
+            logicalSymbol: try LogicalSymbol("EURUSD"),
+            mt5Symbol: try MT5Symbol("EURUSD"),
+            mt5Start: MT5ServerSecond(rawValue: 120),
+            mt5EndExclusive: MT5ServerSecond(rawValue: 300),
+            sourceBars: rates,
+            canonicalBars: [],
+            sourceHash: "fnv64:test",
+            verificationMethod: "test",
+            batchId: BatchId(rawValue: "batch"),
+            verifiedAtUtc: UtcSecond(rawValue: 1)
+        )
+
+        XCTAssertEqual(records.count, 2)
+        XCTAssertEqual(records[0].mt5Start.rawValue, 120)
+        XCTAssertEqual(records[0].mt5EndExclusive.rawValue, 180)
+        XCTAssertEqual(records[0].utcStart.rawValue, 60)
+        XCTAssertEqual(records[0].utcEndExclusive.rawValue, 120)
+        XCTAssertEqual(records[1].mt5Start.rawValue, 180)
+        XCTAssertEqual(records[1].mt5EndExclusive.rawValue, 300)
+        XCTAssertEqual(records[1].utcStart.rawValue, 60)
+        XCTAssertEqual(records[1].utcEndExclusive.rawValue, 180)
+    }
 }
 
 private func ingestState(oldest: Int64, latest: Int64) throws -> IngestState {
@@ -258,13 +385,44 @@ private func validatedBar(mt5: Int64, utc: Int64) throws -> ValidatedBar {
     )
 }
 
+private func ratesResponse(from: Int64, toExclusive: Int64, emitted: [(Int64, String)]) throws -> RatesResponseDTO {
+    let rates = emitted.map { timestamp, price in
+        """
+        {"mt5_server_time":\(timestamp),"open":"\(price)","high":"\(price)","low":"\(price)","close":"\(price)"}
+        """
+    }.joined(separator: ",")
+    let first = emitted.first?.0 ?? 0
+    let last = emitted.last?.0 ?? 0
+    let json = """
+    {
+      "mt5_symbol":"EURUSD",
+      "timeframe":"M1",
+      "requested_from_mt5_server_ts":\(from),
+      "requested_to_mt5_server_ts_exclusive":\(toExclusive),
+      "effective_to_mt5_server_ts_exclusive":\(toExclusive),
+      "latest_closed_mt5_server_ts":\(toExclusive - 60),
+      "series_synchronized":true,
+      "copied_count":\(emitted.count),
+      "emitted_count":\(emitted.count),
+      "first_mt5_server_ts":\(first),
+      "last_mt5_server_ts":\(last),
+      "rates":[\(rates)]
+    }
+    """
+    let data = try XCTUnwrap(json.data(using: .utf8))
+    return try JSONDecoder().decode(RatesResponseDTO.self, from: data)
+}
+
 private func XCTAssertThrowsErrorAsync<T>(
     _ expression: @autoclosure () async throws -> T,
+    _ validation: (Error) -> Void = { _ in },
     file: StaticString = #filePath,
     line: UInt = #line
 ) async {
     do {
         _ = try await expression()
         XCTFail("Expected async expression to throw", file: file, line: line)
-    } catch {}
+    } catch {
+        validation(error)
+    }
 }

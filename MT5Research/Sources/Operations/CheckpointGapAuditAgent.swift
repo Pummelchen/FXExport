@@ -20,6 +20,7 @@ public struct CheckpointGapAuditAgent: ProductionAgent {
         var incompleteStates: [String] = []
         var mt5SymbolMismatches: [String] = []
         var missingCanonical: [String] = []
+        var missingCoverage: [String] = []
         var staleSymbols: [String] = []
         var checked = 0
 
@@ -43,6 +44,10 @@ public struct CheckpointGapAuditAgent: ProductionAgent {
             if count != 1 {
                 missingCanonical.append("\(mapping.logicalSymbol.rawValue):checkpoint_count=\(count)")
             }
+            let coverageCount = try await verifiedCoverageCount(context: context, state: state)
+            if coverageCount < 1 {
+                missingCoverage.append("\(mapping.logicalSymbol.rawValue):checkpoint_utc=\(state.latestIngestedClosedUtcTime.rawValue)")
+            }
             if let bridge = context.bridge {
                 let latest = try bridge.latestClosedM1Bar(mapping.mt5Symbol)
                 if latest.mt5Symbol == mapping.mt5Symbol.rawValue {
@@ -62,6 +67,7 @@ public struct CheckpointGapAuditAgent: ProductionAgent {
             "incomplete=\(incompleteStates.joined(separator: "; "))",
             "mt5_symbol_mismatch=\(mt5SymbolMismatches.joined(separator: "; "))",
             "canonical_mismatch=\(missingCanonical.joined(separator: "; "))",
+            "coverage_missing=\(missingCoverage.joined(separator: "; "))",
             "stale=\(staleSymbols.joined(separator: "; "))"
         ].joined(separator: "; ")
         if !missingCheckpoints.isEmpty {
@@ -75,6 +81,9 @@ public struct CheckpointGapAuditAgent: ProductionAgent {
         }
         if !missingCanonical.isEmpty {
             return factory.warning("Checkpoint canonical row mismatch found", details: details)
+        }
+        if !missingCoverage.isEmpty {
+            return factory.warning("Checkpoint verified coverage is missing", details: details)
         }
         if !staleSymbols.isEmpty {
             return factory.warning("Live checkpoint lag exceeds configured threshold", details: details)
@@ -90,6 +99,21 @@ public struct CheckpointGapAuditAgent: ProductionAgent {
           AND logical_symbol = '\(SQLText.literal(state.logicalSymbol.rawValue))'
           AND mt5_server_ts_raw = \(state.latestIngestedClosedMT5ServerTime.rawValue)
           AND ts_utc = \(state.latestIngestedClosedUtcTime.rawValue)
+        FORMAT TabSeparated
+        """
+        let body = try await context.clickHouse.execute(.select(sql))
+        return Int(body.trimmingCharacters(in: .whitespacesAndNewlines)) ?? -1
+    }
+
+    private func verifiedCoverageCount(context: AgentRuntimeContext, state: IngestState) async throws -> Int {
+        let sql = """
+        SELECT count()
+        FROM \(context.config.clickHouse.database).ohlc_m1_verified_coverage
+        WHERE broker_source_id = '\(SQLText.literal(state.brokerSourceId.rawValue))'
+          AND logical_symbol = '\(SQLText.literal(state.logicalSymbol.rawValue))'
+          AND timeframe = 'M1'
+          AND utc_range_start <= \(state.latestIngestedClosedUtcTime.rawValue)
+          AND utc_range_end_exclusive > \(state.latestIngestedClosedUtcTime.rawValue)
         FORMAT TabSeparated
         """
         let body = try await context.clickHouse.execute(.select(sql))

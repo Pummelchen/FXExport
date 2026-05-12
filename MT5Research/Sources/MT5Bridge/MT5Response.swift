@@ -106,11 +106,29 @@ public struct MT5RateDTO: Codable, Sendable {
 public struct RatesResponseDTO: Codable, Sendable {
     public let mt5Symbol: String
     public let timeframe: String
+    public let requestedFromMT5ServerTs: Int64?
+    public let requestedToMT5ServerTsExclusive: Int64?
+    public let effectiveToMT5ServerTsExclusive: Int64?
+    public let latestClosedMT5ServerTs: Int64?
+    public let seriesSynchronized: Bool?
+    public let copiedCount: Int?
+    public let emittedCount: Int?
+    public let firstMT5ServerTs: Int64?
+    public let lastMT5ServerTs: Int64?
     public let rates: [MT5RateDTO]
 
     enum CodingKeys: String, CodingKey {
         case mt5Symbol = "mt5_symbol"
         case timeframe
+        case requestedFromMT5ServerTs = "requested_from_mt5_server_ts"
+        case requestedToMT5ServerTsExclusive = "requested_to_mt5_server_ts_exclusive"
+        case effectiveToMT5ServerTsExclusive = "effective_to_mt5_server_ts_exclusive"
+        case latestClosedMT5ServerTs = "latest_closed_mt5_server_ts"
+        case seriesSynchronized = "series_synchronized"
+        case copiedCount = "copied_count"
+        case emittedCount = "emitted_count"
+        case firstMT5ServerTs = "first_mt5_server_ts"
+        case lastMT5ServerTs = "last_mt5_server_ts"
         case rates
     }
 }

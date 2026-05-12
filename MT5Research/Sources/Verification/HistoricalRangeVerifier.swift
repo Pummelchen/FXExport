@@ -13,18 +13,29 @@ public struct HistoricalVerificationOutcome: Sendable {
     public let mt5Bars: [ValidatedBar]
     public let databaseBars: [VerificationBar]
     public let result: VerificationResult
+    public let sourceComplete: Bool
+    public let verifiedCoverage: [VerifiedCoverageRecord]
 
     public init(
         range: VerificationRange,
         mt5Bars: [ValidatedBar],
         databaseBars: [VerificationBar],
-        result: VerificationResult
+        result: VerificationResult,
+        sourceComplete: Bool,
+        verifiedCoverage: [VerifiedCoverageRecord]
     ) {
         self.range = range
         self.mt5Bars = mt5Bars
         self.databaseBars = databaseBars
         self.result = result
+        self.sourceComplete = sourceComplete
+        self.verifiedCoverage = verifiedCoverage
     }
+}
+
+private struct MT5VerificationFetch: Sendable {
+    let bars: [ValidatedBar]
+    let coverage: [VerifiedCoverageRecord]
 }
 
 public enum HistoricalRangeVerifierError: Error, CustomStringConvertible, Sendable {
@@ -81,11 +92,11 @@ public struct HistoricalRangeVerifier: Sendable {
         }
         let latestClosed = MT5ServerSecond(rawValue: latestClosedResponse.mt5ServerTime)
 
-        let mt5Bars = try fetchMT5Bars(range: range, mapping: mapping, latestClosed: latestClosed)
+        let mt5Fetch = try await fetchMT5Bars(range: range, mapping: mapping, latestClosed: latestClosed)
         logger.verify("\(range.logicalSymbol.rawValue) - loading canonical M1 OHLC for \(rangeLabel) from ClickHouse")
         let databaseBars = try await CanonicalOhlcStore(clickHouse: clickHouse, database: config.clickHouse.database).fetch(range: range)
         let result = VerificationComparator().compare(
-            mt5SourceBars: mt5Bars.map(VerificationBar.init(validatedBar:)),
+            mt5SourceBars: mt5Fetch.bars.map(VerificationBar.init(validatedBar:)),
             databaseBars: databaseBars
         )
         try await writeVerificationResult(range: range, result: result)
@@ -94,17 +105,27 @@ public struct HistoricalRangeVerifier: Sendable {
         } else {
             logger.warn("\(range.logicalSymbol.rawValue) - \(rangeLabel) is not clean; MT5 comparison found \(result.mismatches.count) mismatch(es)")
         }
-        return HistoricalVerificationOutcome(range: range, mt5Bars: mt5Bars, databaseBars: databaseBars, result: result)
+        return HistoricalVerificationOutcome(
+            range: range,
+            mt5Bars: mt5Fetch.bars,
+            databaseBars: databaseBars,
+            result: result,
+            sourceComplete: true,
+            verifiedCoverage: mt5Fetch.coverage
+        )
     }
 
     private func fetchMT5Bars(
         range: VerificationRange,
         mapping: SymbolMapping,
         latestClosed: MT5ServerSecond
-    ) throws -> [ValidatedBar] {
+    ) async throws -> MT5VerificationFetch {
         var cursor = range.mt5Start
         var output: [ValidatedBar] = []
+        var coverage: [VerifiedCoverageRecord] = []
         let validator = OhlcValidator(timeConverter: TimeConverter(offsetMap: offsetMap))
+        let coverageBuilder = CoverageRangeBuilder(offsetMap: offsetMap)
+        let sourceVerifier = MT5SourceRangeVerifier()
         while cursor.rawValue < range.mt5EndExclusive.rawValue {
             let chunkEnd = try chunkEndExclusive(cursor: cursor, rangeEndExclusive: range.mt5EndExclusive)
             let chunkLabel = OperatorStatusText.monthRangeLabel(start: cursor, endExclusive: chunkEnd)
@@ -115,19 +136,20 @@ public struct HistoricalRangeVerifier: Sendable {
                 start: cursor,
                 end: chunkEnd
             )
-            let response = try bridge.ratesRange(
+            let sourceRange = try await sourceVerifier.fetchStableRange(
                 mt5Symbol: mapping.mt5Symbol,
                 from: cursor,
                 toExclusive: chunkEnd,
                 maxBars: config.app.chunkSize
-            )
-            guard response.mt5Symbol == mapping.mt5Symbol.rawValue else {
-                throw HistoricalRangeVerifierError.invalidMT5Response("expected rates for \(mapping.mt5Symbol.rawValue), got \(response.mt5Symbol)")
+            ) {
+                try bridge.ratesRange(
+                    mt5Symbol: mapping.mt5Symbol,
+                    from: cursor,
+                    toExclusive: chunkEnd,
+                    maxBars: config.app.chunkSize
+                )
             }
-            guard response.timeframe == Timeframe.m1.rawValue else {
-                throw HistoricalRangeVerifierError.invalidMT5Response("expected M1 rates, got \(response.timeframe)")
-            }
-            let closedBars = try response.rates.map {
+            let closedBars = try sourceRange.response.rates.map {
                 try $0.toClosedM1Bar(logicalSymbol: mapping.logicalSymbol, mt5Symbol: mapping.mt5Symbol, digits: mapping.digits)
             }
             try validateClosedBarsInRange(closedBars, from: cursor, toExclusive: chunkEnd)
@@ -140,10 +162,24 @@ public struct HistoricalRangeVerifier: Sendable {
                 batchId: batchId,
                 ingestedAtUtc: UtcSecond(rawValue: Int64(Date().timeIntervalSince1970))
             )
-            output.append(contentsOf: try validator.validateBatch(closedBars, context: context))
+            let validated = try validator.validateBatch(closedBars, context: context)
+            output.append(contentsOf: validated)
+            coverage.append(contentsOf: try coverageBuilder.makeRecords(
+                brokerSourceId: range.brokerSourceId,
+                logicalSymbol: range.logicalSymbol,
+                mt5Symbol: mapping.mt5Symbol,
+                mt5Start: cursor,
+                mt5EndExclusive: chunkEnd,
+                sourceBars: sourceRange.response.rates,
+                canonicalBars: validated,
+                sourceHash: sourceRange.sourceHash,
+                verificationMethod: "mt5_verifier_stable_double_read",
+                batchId: batchId,
+                verifiedAtUtc: context.ingestedAtUtc
+            ))
             cursor = chunkEnd
         }
-        return output
+        return MT5VerificationFetch(bars: output, coverage: coverage)
     }
 
     private func chunkEndExclusive(cursor: MT5ServerSecond, rangeEndExclusive: MT5ServerSecond) throws -> MT5ServerSecond {

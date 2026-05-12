@@ -69,6 +69,7 @@ public struct ClickHouseHistoricalOhlcDataProvider: HistoricalOhlcDataProviding 
         guard limit < Int.max else {
             throw HistoryDataError.invalidRequest("maximumRows is too large.")
         }
+        try await validateVerifiedCoverage(request)
         let body = try await client.execute(.select(try sql(for: request, limit: limit + 1)))
         let rows = try parseRows(body, request: request)
         guard rows.count <= limit else {
@@ -116,11 +117,11 @@ public struct ClickHouseHistoricalOhlcDataProvider: HistoricalOhlcDataProviding 
     }
 
     private func sql(for request: HistoricalOhlcRequest, limit: Int) throws -> String {
-        let database = try Self.sqlIdentifier(database)
+        let databaseName = try Self.sqlIdentifier(database)
         return """
         SELECT mt5_symbol, ts_utc, mt5_server_ts_raw, open_scaled, high_scaled, low_scaled, close_scaled,
                digits, timeframe, offset_confidence, source_status, bar_hash
-        FROM \(database).ohlc_m1_canonical
+        FROM \(databaseName).ohlc_m1_canonical
         WHERE broker_source_id = '\(Self.sqlLiteral(request.brokerSourceId.rawValue))'
           AND logical_symbol = '\(Self.sqlLiteral(request.logicalSymbol.rawValue))'
           AND ts_utc >= \(request.utcStartInclusive.rawValue)
@@ -129,6 +130,56 @@ public struct ClickHouseHistoricalOhlcDataProvider: HistoricalOhlcDataProviding 
         LIMIT \(limit)
         FORMAT TabSeparated
         """
+    }
+
+    private func validateVerifiedCoverage(_ request: HistoricalOhlcRequest) async throws {
+        let databaseName = try Self.sqlIdentifier(database)
+        let body = try await client.execute(.select("""
+        SELECT utc_range_start, utc_range_end_exclusive
+        FROM \(databaseName).ohlc_m1_verified_coverage
+        WHERE broker_source_id = '\(Self.sqlLiteral(request.brokerSourceId.rawValue))'
+          AND logical_symbol = '\(Self.sqlLiteral(request.logicalSymbol.rawValue))'
+          AND timeframe = 'M1'
+          AND utc_range_end_exclusive > \(request.utcStartInclusive.rawValue)
+          AND utc_range_start < \(request.utcEndExclusive.rawValue)
+        ORDER BY utc_range_start ASC, utc_range_end_exclusive ASC
+        FORMAT TabSeparated
+        """))
+        let intervals = try parseCoverageIntervals(body)
+        var cursor = request.utcStartInclusive.rawValue
+        for interval in intervals where interval.end > cursor {
+            guard interval.start <= cursor else {
+                throw HistoryDataError.missingVerifiedCoverage(
+                    request.logicalSymbol,
+                    UtcSecond(rawValue: cursor),
+                    UtcSecond(rawValue: min(interval.start, request.utcEndExclusive.rawValue))
+                )
+            }
+            cursor = max(cursor, interval.end)
+            if cursor >= request.utcEndExclusive.rawValue {
+                return
+            }
+        }
+        throw HistoryDataError.missingVerifiedCoverage(
+            request.logicalSymbol,
+            UtcSecond(rawValue: cursor),
+            request.utcEndExclusive
+        )
+    }
+
+    private func parseCoverageIntervals(_ body: String) throws -> [CoverageInterval] {
+        try body
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map { line in
+                let fields = line.split(separator: "\t", omittingEmptySubsequences: false)
+                guard fields.count == 2,
+                      let start = Int64(fields[0]),
+                      let end = Int64(fields[1]),
+                      start < end else {
+                    throw HistoryDataError.invalidCanonicalRow("invalid verified coverage row '\(line)'")
+                }
+                return CoverageInterval(start: start, end: end)
+            }
     }
 
     private func parseRows(_ body: String, request: HistoricalOhlcRequest) throws -> [CanonicalOhlcRow] {
@@ -273,4 +324,9 @@ private struct CanonicalOhlcRow: Sendable {
     let low: Int64
     let close: Int64
     let digits: Digits
+}
+
+private struct CoverageInterval: Sendable {
+    let start: Int64
+    let end: Int64
 }

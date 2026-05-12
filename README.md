@@ -1,6 +1,6 @@
 # FXExport
 
-FXExport contains `MT5Research`, a Swift Package Manager terminal project for moving MetaTrader 5 M1 OHLC history into ClickHouse with defensive validation, audit storage, MT5 cross-check verification, safe canonical repair, and future CPU/GPU backtesting support.
+FXExport contains `MT5Research`, a Swift Package Manager terminal project for moving MetaTrader 5 M1 OHLC history into ClickHouse with defensive validation, manifest-backed MT5 source completeness checks, audit storage, verified coverage certificates, MT5 cross-check verification, safe canonical repair, and read-only data access for external CPU/GPU backtesting apps.
 
 Start here:
 

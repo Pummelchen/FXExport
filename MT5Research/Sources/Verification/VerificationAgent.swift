@@ -71,6 +71,27 @@ public struct VerificationAgent: Sendable {
             logger.warn(issue)
         }
 
+        logger.verify("Running unfinished ingest operation check")
+        let unfinishedIngestCount = try await clickHouse.execute(.select("""
+        SELECT count()
+        FROM (
+            SELECT operation_type, batch_id, argMax(status, tuple(event_at_utc, status_rank)) AS latest_status
+            FROM \(config.clickHouse.database).ingest_operations
+            WHERE broker_source_id = '\(sqlLiteral(config.brokerTime.brokerSourceId.rawValue))'
+            GROUP BY operation_type, batch_id
+        )
+        WHERE NOT (
+            (operation_type IN ('backfill', 'live') AND latest_status IN ('checkpointed', 'empty_coverage_verified'))
+            OR (operation_type = 'repair' AND latest_status = 'repair_verified')
+        )
+        FORMAT TabSeparated
+        """))
+        if unfinishedIngestCount.trimmingCharacters(in: .whitespacesAndNewlines) != "0" {
+            let issue = "Unfinished ingest operation batches found: \(unfinishedIngestCount.trimmingCharacters(in: .whitespacesAndNewlines))"
+            integrityIssues.append(issue)
+            logger.warn(issue)
+        }
+
         guard integrityIssues.isEmpty else {
             throw VerificationError.databaseIntegrityFailed(integrityIssues)
         }

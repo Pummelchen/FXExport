@@ -168,7 +168,9 @@ public struct StartCheckRunner: Sendable {
             "verification_results",
             "repair_log",
             "runtime_agent_events",
-            "runtime_agent_state"
+            "runtime_agent_state",
+            "ingest_operations",
+            "ohlc_m1_verified_coverage"
         ]
         let quoted = requiredTables.map { "'\(SQLText.literal($0))'" }.joined(separator: ",")
         let sql = """

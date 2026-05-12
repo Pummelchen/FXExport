@@ -41,6 +41,8 @@ public enum BacktestReadinessError: Error, CustomStringConvertible, Sendable {
     case mt5SymbolMismatch(symbol: LogicalSymbol, expected: MT5Symbol, actual: MT5Symbol)
     case requestedRangeBeyondCheckpoint(symbol: LogicalSymbol, requestedEnd: UtcSecond, checkpoint: UtcSecond)
     case noCanonicalBars(LogicalSymbol, UtcSecond, UtcSecond)
+    case missingVerifiedCoverage(symbol: LogicalSymbol, from: UtcSecond, to: UtcSecond)
+    case unfinishedIngestOperations(Int64)
     case duplicateCanonicalKeys(Int64)
     case ohlcInvariantFailures(Int64)
     case nonVerifiedCanonicalOffsets(Int64)
@@ -69,6 +71,10 @@ public enum BacktestReadinessError: Error, CustomStringConvertible, Sendable {
             return "\(symbol.rawValue) requested backtest end \(requestedEnd.rawValue) is beyond latest verified checkpoint \(checkpoint.rawValue)."
         case .noCanonicalBars(let symbol, let from, let to):
             return "\(symbol.rawValue) has no canonical bars in requested UTC range \(from.rawValue)..<\(to.rawValue)."
+        case .missingVerifiedCoverage(let symbol, let from, let to):
+            return "Backtest blocked: \(symbol.rawValue) UTC range \(from.rawValue)..<\(to.rawValue) is not fully covered by verified MT5 source coverage records."
+        case .unfinishedIngestOperations(let count):
+            return "Backtest blocked: \(count) ingest operation batch(es) are unfinished or failed. Resume the importer/live updater or verifier repair so each batch reaches a terminal verified status."
         case .duplicateCanonicalKeys(let count):
             return "Backtest blocked: \(count) duplicate canonical UTC key group(s) exist."
         case .ohlcInvariantFailures(let count):
@@ -103,6 +109,8 @@ public struct BacktestReadinessGate: Sendable {
     public func assertReady(_ request: BacktestReadinessRequest) async throws {
         try validateRequest(request)
         try await validateIngestIsComplete(request)
+        try await validateNoUnfinishedIngestOperations()
+        try await validateVerifiedCoverage(request)
         try await validateCanonicalDatabase()
         try await validateRequestedRangeHasData(request)
         try await validateVerificationAndRepairState()
@@ -158,6 +166,58 @@ public struct BacktestReadinessGate: Sendable {
                 }
             }
         }
+    }
+
+    private func validateNoUnfinishedIngestOperations() async throws {
+        let unfinished = try await scalar("""
+        SELECT count()
+        FROM (
+            SELECT operation_type, batch_id, argMax(status, tuple(event_at_utc, status_rank)) AS latest_status
+            FROM \(config.clickHouse.database).ingest_operations
+            WHERE broker_source_id = '\(SQLText.literal(config.brokerTime.brokerSourceId.rawValue))'
+            GROUP BY operation_type, batch_id
+        )
+        WHERE NOT (
+            (operation_type IN ('backfill', 'live') AND latest_status IN ('checkpointed', 'empty_coverage_verified'))
+            OR (operation_type = 'repair' AND latest_status = 'repair_verified')
+        )
+        FORMAT TabSeparated
+        """)
+        guard unfinished == 0 else { throw BacktestReadinessError.unfinishedIngestOperations(unfinished) }
+    }
+
+    private func validateVerifiedCoverage(_ request: BacktestReadinessRequest) async throws {
+        let body = try await clickHouse.execute(.select("""
+        SELECT utc_range_start, utc_range_end_exclusive
+        FROM \(config.clickHouse.database).ohlc_m1_verified_coverage
+        WHERE broker_source_id = '\(SQLText.literal(request.brokerSourceId.rawValue))'
+          AND logical_symbol = '\(SQLText.literal(request.logicalSymbol.rawValue))'
+          AND timeframe = 'M1'
+          AND utc_range_end_exclusive > \(request.utcStart.rawValue)
+          AND utc_range_start < \(request.utcEndExclusive.rawValue)
+        ORDER BY utc_range_start ASC, utc_range_end_exclusive ASC
+        FORMAT TabSeparated
+        """))
+        let intervals = try parseCoverageIntervals(body)
+        var cursor = request.utcStart.rawValue
+        for interval in intervals where interval.end > cursor {
+            guard interval.start <= cursor else {
+                throw BacktestReadinessError.missingVerifiedCoverage(
+                    symbol: request.logicalSymbol,
+                    from: UtcSecond(rawValue: cursor),
+                    to: UtcSecond(rawValue: min(interval.start, request.utcEndExclusive.rawValue))
+                )
+            }
+            cursor = max(cursor, interval.end)
+            if cursor >= request.utcEndExclusive.rawValue {
+                return
+            }
+        }
+        throw BacktestReadinessError.missingVerifiedCoverage(
+            symbol: request.logicalSymbol,
+            from: UtcSecond(rawValue: cursor),
+            to: request.utcEndExclusive
+        )
     }
 
     private func validateCanonicalDatabase() async throws {
@@ -306,6 +366,21 @@ public struct BacktestReadinessGate: Sendable {
         return rows
     }
 
+    private func parseCoverageIntervals(_ body: String) throws -> [UtcCoverageInterval] {
+        try body
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map { line in
+                let fields = line.split(separator: "\t", omittingEmptySubsequences: false)
+                guard fields.count == 2,
+                      let start = Int64(fields[0]),
+                      let end = Int64(fields[1]),
+                      start < end else {
+                    throw BacktestReadinessError.invalidScalar(String(line))
+                }
+                return UtcCoverageInterval(start: start, end: end)
+            }
+    }
+
     private func scalar(_ sql: String) async throws -> Int64 {
         let body = try await clickHouse.execute(.select(sql))
         let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -314,4 +389,9 @@ public struct BacktestReadinessGate: Sendable {
         }
         return value
     }
+}
+
+private struct UtcCoverageInterval: Sendable {
+    let start: Int64
+    let end: Int64
 }

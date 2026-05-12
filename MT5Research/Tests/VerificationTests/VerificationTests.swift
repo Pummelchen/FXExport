@@ -13,6 +13,7 @@ final class VerificationTests: XCTestCase {
             policy.decide(
                 verification: VerificationResult(isClean: true, mismatches: []),
                 mt5Available: true,
+                sourceComplete: true,
                 utcMappingAmbiguous: false
             ),
             .noRepairNeeded
@@ -21,9 +22,19 @@ final class VerificationTests: XCTestCase {
             policy.decide(
                 verification: VerificationResult(isClean: false, mismatches: [.rowCount(mt5: 1, database: 0)]),
                 mt5Available: false,
+                sourceComplete: true,
                 utcMappingAmbiguous: false
             ),
             .refuse(reason: "MT5 source data is unavailable")
+        )
+        XCTAssertEqual(
+            policy.decide(
+                verification: VerificationResult(isClean: false, mismatches: [.rowCount(mt5: 1, database: 0)]),
+                mt5Available: true,
+                sourceComplete: false,
+                utcMappingAmbiguous: false
+            ),
+            .refuse(reason: "MT5 source range completeness is not proven")
         )
     }
 
@@ -269,7 +280,7 @@ final class VerificationTests: XCTestCase {
         try await agent.startupChecks(randomRanges: 0)
 
         let queries = await clickHouse.queries
-        XCTAssertEqual(queries.count, 3)
+        XCTAssertEqual(queries.count, 4)
         for query in queries {
             XCTAssertTrue(query.sql.contains("broker_source_id = 'demo'"), query.sql)
         }

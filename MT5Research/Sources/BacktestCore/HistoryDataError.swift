@@ -6,6 +6,7 @@ public enum HistoryDataError: Error, Equatable, CustomStringConvertible, Sendabl
     case invalidSeries(String)
     case invalidCanonicalRow(String)
     case emptyResult(LogicalSymbol, UtcSecond, UtcSecond)
+    case missingVerifiedCoverage(LogicalSymbol, UtcSecond, UtcSecond)
     case rowLimitExceeded(limit: Int)
     case unsupportedInternalCompute(String)
 
@@ -19,6 +20,8 @@ public enum HistoryDataError: Error, Equatable, CustomStringConvertible, Sendabl
             return "Invalid canonical OHLC row: \(reason)"
         case .emptyResult(let symbol, let from, let to):
             return "No canonical M1 bars were found for \(symbol.rawValue) in UTC range \(from.rawValue)..<\(to.rawValue)."
+        case .missingVerifiedCoverage(let symbol, let from, let to):
+            return "\(symbol.rawValue) UTC range \(from.rawValue)..<\(to.rawValue) is not fully covered by verified MT5 source coverage. Resume verification/import before using this range."
         case .rowLimitExceeded(let limit):
             return "History data request returned more than \(limit) rows. Split the UTC range into smaller chunks."
         case .unsupportedInternalCompute(let command):

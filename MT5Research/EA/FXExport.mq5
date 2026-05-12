@@ -318,9 +318,25 @@ void HandleRatesRange(const string requestId, const string command, const string
    long maxToExclusive = fromTs + (long)maxBars * 60;
    if(maxToExclusive > fromTs && maxToExclusive < safeToExclusive)
       safeToExclusive = maxToExclusive;
+   long synchronized = 0;
+   SeriesInfoInteger(symbol, PERIOD_M1, SERIES_SYNCHRONIZED, synchronized);
    if(safeToExclusive <= fromTs)
    {
-      SendOK(requestId, command, "{\"mt5_symbol\":\"" + JsonEscape(symbol) + "\",\"timeframe\":\"M1\",\"rates\":[]}");
+      string emptyResponse = "{";
+      emptyResponse += "\"mt5_symbol\":\"" + JsonEscape(symbol) + "\",";
+      emptyResponse += "\"timeframe\":\"M1\",";
+      emptyResponse += "\"requested_from_mt5_server_ts\":" + IntegerToString(fromTs) + ",";
+      emptyResponse += "\"requested_to_mt5_server_ts_exclusive\":" + IntegerToString(toExclusive) + ",";
+      emptyResponse += "\"effective_to_mt5_server_ts_exclusive\":" + IntegerToString(safeToExclusive) + ",";
+      emptyResponse += "\"latest_closed_mt5_server_ts\":" + IntegerToString(latestClosed) + ",";
+      emptyResponse += "\"series_synchronized\":" + (synchronized != 0 ? "true" : "false") + ",";
+      emptyResponse += "\"copied_count\":0,";
+      emptyResponse += "\"emitted_count\":0,";
+      emptyResponse += "\"first_mt5_server_ts\":0,";
+      emptyResponse += "\"last_mt5_server_ts\":0,";
+      emptyResponse += "\"rates\":[]";
+      emptyResponse += "}";
+      SendOK(requestId, command, emptyResponse);
       return;
    }
 
@@ -335,11 +351,9 @@ void HandleRatesRange(const string requestId, const string command, const string
    }
 
    int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
-   string response = "{";
-   response += "\"mt5_symbol\":\"" + JsonEscape(symbol) + "\",";
-   response += "\"timeframe\":\"M1\",";
-   response += "\"rates\":[";
-
+   long firstEmitted = 0;
+   long lastEmitted = 0;
+   string ratesJson = "";
    int emitted = 0;
    for(int i = 0; i < copied && emitted < maxBars; i++)
    {
@@ -347,17 +361,35 @@ void HandleRatesRange(const string requestId, const string command, const string
       if(ts < fromTs || ts >= safeToExclusive || ts > latestClosed)
          continue;
 
+      if(emitted == 0)
+         firstEmitted = ts;
+      lastEmitted = ts;
       if(emitted > 0)
-         response += ",";
-      response += "{";
-      response += "\"mt5_server_time\":" + IntegerToString(ts) + ",";
-      response += "\"open\":\"" + DoubleToString(rates[i].open, digits) + "\",";
-      response += "\"high\":\"" + DoubleToString(rates[i].high, digits) + "\",";
-      response += "\"low\":\"" + DoubleToString(rates[i].low, digits) + "\",";
-      response += "\"close\":\"" + DoubleToString(rates[i].close, digits) + "\"";
-      response += "}";
+         ratesJson += ",";
+      ratesJson += "{";
+      ratesJson += "\"mt5_server_time\":" + IntegerToString(ts) + ",";
+      ratesJson += "\"open\":\"" + DoubleToString(rates[i].open, digits) + "\",";
+      ratesJson += "\"high\":\"" + DoubleToString(rates[i].high, digits) + "\",";
+      ratesJson += "\"low\":\"" + DoubleToString(rates[i].low, digits) + "\",";
+      ratesJson += "\"close\":\"" + DoubleToString(rates[i].close, digits) + "\"";
+      ratesJson += "}";
       emitted++;
    }
+
+   string response = "{";
+   response += "\"mt5_symbol\":\"" + JsonEscape(symbol) + "\",";
+   response += "\"timeframe\":\"M1\",";
+   response += "\"requested_from_mt5_server_ts\":" + IntegerToString(fromTs) + ",";
+   response += "\"requested_to_mt5_server_ts_exclusive\":" + IntegerToString(toExclusive) + ",";
+   response += "\"effective_to_mt5_server_ts_exclusive\":" + IntegerToString(safeToExclusive) + ",";
+   response += "\"latest_closed_mt5_server_ts\":" + IntegerToString(latestClosed) + ",";
+   response += "\"series_synchronized\":" + (synchronized != 0 ? "true" : "false") + ",";
+   response += "\"copied_count\":" + IntegerToString(copied) + ",";
+   response += "\"emitted_count\":" + IntegerToString(emitted) + ",";
+   response += "\"first_mt5_server_ts\":" + IntegerToString(firstEmitted) + ",";
+   response += "\"last_mt5_server_ts\":" + IntegerToString(lastEmitted) + ",";
+   response += "\"rates\":[";
+   response += ratesJson;
    response += "]}";
    SendOK(requestId, command, response);
 }

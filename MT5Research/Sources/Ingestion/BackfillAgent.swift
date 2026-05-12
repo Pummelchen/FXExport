@@ -92,9 +92,13 @@ public struct BackfillAgent: Sendable {
             acceptedLiveOffsetSeconds: config.brokerTime.acceptedLiveOffsetSeconds,
             logger: logger
         )
-        let validator = OhlcValidator(timeConverter: TimeConverter(offsetMap: offsetMap))
+        let timeConverter = TimeConverter(offsetMap: offsetMap)
+        let validator = OhlcValidator(timeConverter: timeConverter)
         let insertBuilder = ClickHouseInsertBuilder(database: config.clickHouse.database)
         let batchBuilder = BatchBuilder(chunkSize: config.app.chunkSize)
+        let sourceVerifier = MT5SourceRangeVerifier()
+        let coverageBuilder = CoverageRangeBuilder(offsetMap: offsetMap)
+        let auditStore = IngestAuditStore(clickHouse: clickHouse, database: config.clickHouse.database)
 
         for mapping in mappings {
             do {
@@ -102,7 +106,10 @@ public struct BackfillAgent: Sendable {
                     mapping: mapping,
                     validator: validator,
                     insertBuilder: insertBuilder,
-                    batchBuilder: batchBuilder
+                    batchBuilder: batchBuilder,
+                    sourceVerifier: sourceVerifier,
+                    coverageBuilder: coverageBuilder,
+                    auditStore: auditStore
                 )
             } catch {
                 logger.error("\(mapping.logicalSymbol.rawValue): \(error)")
@@ -115,7 +122,10 @@ public struct BackfillAgent: Sendable {
         mapping: SymbolMapping,
         validator: OhlcValidator,
         insertBuilder: ClickHouseInsertBuilder,
-        batchBuilder: BatchBuilder
+        batchBuilder: BatchBuilder,
+        sourceVerifier: MT5SourceRangeVerifier,
+        coverageBuilder: CoverageRangeBuilder,
+        auditStore: IngestAuditStore
     ) async throws {
         logger.info("\(mapping.logicalSymbol.rawValue) - preparing MT5 symbol \(mapping.mt5Symbol.rawValue) for historical M1 OHLC import")
         let symbolInfo = try bridge.prepareSymbol(mapping.mt5Symbol)
@@ -162,62 +172,191 @@ public struct BackfillAgent: Sendable {
             let sourceRangeLabel = OperatorStatusText.monthRangeLabel(start: range.from, endExclusive: range.toExclusive)
             logger.info("\(mapping.logicalSymbol.rawValue) - pulling M1 OHLC for \(sourceRangeLabel)")
 
-            let response = try bridge.ratesRange(
-                mt5Symbol: mapping.mt5Symbol,
-                from: range.from,
-                toExclusive: range.toExclusive,
-                maxBars: config.app.chunkSize
-            )
-            try validateRatesResponse(response, expectedMT5Symbol: mapping.mt5Symbol)
-            let closedBars = try response.rates.map {
-                try $0.toClosedM1Bar(logicalSymbol: mapping.logicalSymbol, mt5Symbol: mapping.mt5Symbol, digits: mapping.digits)
-            }
-            try validateClosedBarsInRange(closedBars, from: range.from, toExclusive: range.toExclusive)
-            guard !closedBars.isEmpty else {
-                logger.warn("\(mapping.logicalSymbol.rawValue) - no MT5 M1 bars available for \(sourceRangeLabel); treating this as an MT5 source gap and moving on")
-                cursor = range.toExclusive
-                continue
-            }
-
-            let now = UtcSecond(rawValue: Int64(Date().timeIntervalSince1970))
-            let context = OhlcValidationContext(
-                brokerSourceId: config.brokerTime.brokerSourceId,
-                expectedLogicalSymbol: mapping.logicalSymbol,
-                expectedMT5Symbol: mapping.mt5Symbol,
-                expectedDigits: mapping.digits,
-                latestClosedMT5ServerTime: latestClosed,
+            try await recordChunkOperation(
+                auditStore: auditStore,
+                mapping: mapping,
+                operationType: .backfill,
                 batchId: batchId,
-                ingestedAtUtc: now
+                range: range,
+                status: .started,
+                stage: "range_selected",
+                sourceBarCount: nil,
+                canonicalRowCount: nil,
+                sourceHash: nil
             )
-            logger.info("\(mapping.logicalSymbol.rawValue) - validating \(sourceRangeLabel) for OHLC integrity and verified UTC conversion")
-            let validated = try validator.validateBatch(closedBars, context: context)
-            try await insertValidatedBars(validated, insertBuilder: insertBuilder)
+            do {
+                let sourceRange = try await sourceVerifier.fetchStableRange(
+                    mt5Symbol: mapping.mt5Symbol,
+                    from: range.from,
+                    toExclusive: range.toExclusive,
+                    maxBars: config.app.chunkSize
+                ) {
+                    try bridge.ratesRange(
+                        mt5Symbol: mapping.mt5Symbol,
+                        from: range.from,
+                        toExclusive: range.toExclusive,
+                        maxBars: config.app.chunkSize
+                    )
+                }
+                try await recordChunkOperation(
+                    auditStore: auditStore,
+                    mapping: mapping,
+                    operationType: .backfill,
+                    batchId: batchId,
+                    range: range,
+                    status: .sourceVerified,
+                    stage: "mt5_stable_double_read",
+                    sourceBarCount: sourceRange.manifest.emittedCount,
+                    canonicalRowCount: nil,
+                    sourceHash: sourceRange.sourceHash
+                )
+                try validateRatesResponse(sourceRange.response, expectedMT5Symbol: mapping.mt5Symbol)
+                let closedBars = try sourceRange.response.rates.map {
+                    try $0.toClosedM1Bar(logicalSymbol: mapping.logicalSymbol, mt5Symbol: mapping.mt5Symbol, digits: mapping.digits)
+                }
+                try validateClosedBarsInRange(closedBars, from: range.from, toExclusive: range.toExclusive)
 
-            guard let first = validated.first, let last = validated.last else {
-                throw IngestError.invalidChunk("validated chunk unexpectedly empty")
+                let now = UtcSecond(rawValue: Int64(Date().timeIntervalSince1970))
+                guard !closedBars.isEmpty else {
+                    let coverageRecords = try coverageBuilder.makeRecords(
+                        brokerSourceId: config.brokerTime.brokerSourceId,
+                        logicalSymbol: mapping.logicalSymbol,
+                        mt5Symbol: mapping.mt5Symbol,
+                        mt5Start: range.from,
+                        mt5EndExclusive: range.toExclusive,
+                        sourceBars: sourceRange.response.rates,
+                        canonicalBars: [],
+                        sourceHash: sourceRange.sourceHash,
+                        verificationMethod: "mt5_stable_double_read_empty",
+                        batchId: batchId,
+                        verifiedAtUtc: now
+                    )
+                    for coverage in coverageRecords {
+                        try await auditStore.recordVerifiedCoverage(coverage)
+                    }
+                    try await recordChunkOperation(
+                        auditStore: auditStore,
+                        mapping: mapping,
+                        operationType: .backfill,
+                        batchId: batchId,
+                        range: range,
+                        status: .emptyCoverageVerified,
+                        stage: "empty_source_coverage_written",
+                        sourceBarCount: 0,
+                        canonicalRowCount: 0,
+                        sourceHash: sourceRange.sourceHash
+                    )
+                    logger.ok("\(mapping.logicalSymbol.rawValue) - \(sourceRangeLabel) contains no MT5 bars; source gap verified and checkpoint left unchanged")
+                    cursor = range.toExclusive
+                    continue
+                }
+
+                let context = OhlcValidationContext(
+                    brokerSourceId: config.brokerTime.brokerSourceId,
+                    expectedLogicalSymbol: mapping.logicalSymbol,
+                    expectedMT5Symbol: mapping.mt5Symbol,
+                    expectedDigits: mapping.digits,
+                    latestClosedMT5ServerTime: latestClosed,
+                    batchId: batchId,
+                    ingestedAtUtc: now
+                )
+                logger.info("\(mapping.logicalSymbol.rawValue) - validating \(sourceRangeLabel) for OHLC integrity and verified UTC conversion")
+                let validated = try validator.validateBatch(closedBars, context: context)
+                try await writeValidatedBars(
+                    validated,
+                    insertBuilder: insertBuilder,
+                    auditStore: auditStore,
+                    mapping: mapping,
+                    operationType: .backfill,
+                    batchId: batchId,
+                    range: range,
+                    sourceBarCount: sourceRange.manifest.emittedCount,
+                    sourceHash: sourceRange.sourceHash
+                )
+
+                guard let first = validated.first, let last = validated.last else {
+                    throw IngestError.invalidChunk("validated chunk unexpectedly empty")
+                }
+                let coverageRecords = try coverageBuilder.makeRecords(
+                    brokerSourceId: config.brokerTime.brokerSourceId,
+                    logicalSymbol: mapping.logicalSymbol,
+                    mt5Symbol: mapping.mt5Symbol,
+                    mt5Start: range.from,
+                    mt5EndExclusive: range.toExclusive,
+                    sourceBars: sourceRange.response.rates,
+                    canonicalBars: validated,
+                    sourceHash: sourceRange.sourceHash,
+                    verificationMethod: "mt5_stable_double_read_canonical_readback",
+                    batchId: batchId,
+                    verifiedAtUtc: now
+                )
+                for coverage in coverageRecords {
+                    try await auditStore.recordVerifiedCoverage(coverage)
+                }
+                let verifiedRangeLabel = OperatorStatusText.monthRangeLabel(
+                    start: first.utcTime,
+                    endExclusive: try addOneMinute(to: last.utcTime)
+                )
+                let state = IngestState(
+                    brokerSourceId: config.brokerTime.brokerSourceId,
+                    logicalSymbol: mapping.logicalSymbol,
+                    mt5Symbol: mapping.mt5Symbol,
+                    oldestMT5ServerTime: oldest,
+                    latestIngestedClosedMT5ServerTime: last.mt5ServerTime,
+                    latestIngestedClosedUtcTime: last.utcTime,
+                    status: last.mt5ServerTime.rawValue >= latestClosed.rawValue ? .live : .backfilling,
+                    lastBatchId: batchId,
+                    updatedAtUtc: now
+                )
+                try await checkpointStore.save(state)
+                try await recordChunkOperation(
+                    auditStore: auditStore,
+                    mapping: mapping,
+                    operationType: .backfill,
+                    batchId: batchId,
+                    range: range,
+                    status: .checkpointed,
+                    stage: "checkpoint_saved",
+                    sourceBarCount: sourceRange.manifest.emittedCount,
+                    canonicalRowCount: validated.count,
+                    sourceHash: sourceRange.sourceHash
+                )
+                logger.ok("\(mapping.logicalSymbol.rawValue) - \(verifiedRangeLabel) pulled, verified, UTC correct and canonical data clean (\(validated.count) closed M1 bars)")
+                cursor = try addOneMinute(to: last.mt5ServerTime)
+            } catch {
+                do {
+                    try await recordChunkOperation(
+                        auditStore: auditStore,
+                        mapping: mapping,
+                        operationType: .backfill,
+                        batchId: batchId,
+                        range: range,
+                        status: .failed,
+                        stage: "chunk_failed",
+                        sourceBarCount: nil,
+                        canonicalRowCount: nil,
+                        sourceHash: nil,
+                        errorMessage: String(describing: error)
+                    )
+                } catch {
+                    logger.warn("\(mapping.logicalSymbol.rawValue) - failed to record ingest failure for \(sourceRangeLabel): \(error)")
+                }
+                throw error
             }
-            let verifiedRangeLabel = OperatorStatusText.monthRangeLabel(
-                start: first.utcTime,
-                endExclusive: try addOneMinute(to: last.utcTime)
-            )
-            let state = IngestState(
-                brokerSourceId: config.brokerTime.brokerSourceId,
-                logicalSymbol: mapping.logicalSymbol,
-                mt5Symbol: mapping.mt5Symbol,
-                oldestMT5ServerTime: oldest,
-                latestIngestedClosedMT5ServerTime: last.mt5ServerTime,
-                latestIngestedClosedUtcTime: last.utcTime,
-                status: last.mt5ServerTime.rawValue >= latestClosed.rawValue ? .live : .backfilling,
-                lastBatchId: batchId,
-                updatedAtUtc: now
-            )
-            try await checkpointStore.save(state)
-            logger.ok("\(mapping.logicalSymbol.rawValue) - \(verifiedRangeLabel) pulled, verified, UTC correct and canonical data clean (\(validated.count) closed M1 bars)")
-            cursor = try addOneMinute(to: last.mt5ServerTime)
         }
     }
 
-    private func insertValidatedBars(_ bars: [ValidatedBar], insertBuilder: ClickHouseInsertBuilder) async throws {
+    private func writeValidatedBars(
+        _ bars: [ValidatedBar],
+        insertBuilder: ClickHouseInsertBuilder,
+        auditStore: IngestAuditStore,
+        mapping: SymbolMapping,
+        operationType: IngestOperationType,
+        batchId: BatchId,
+        range: (from: MT5ServerSecond, toExclusive: MT5ServerSecond),
+        sourceBarCount: Int,
+        sourceHash: String
+    ) async throws {
         guard let first = bars.first else { return }
         let rawInsert = insertBuilder.rawBarsInsert(bars)
         let canonicalDelete = try insertBuilder.canonicalRangeDelete(bars)
@@ -225,9 +364,87 @@ public struct BackfillAgent: Sendable {
         try await CanonicalConflictRecorder(clickHouse: clickHouse, insertBuilder: insertBuilder)
             .recordConflictsBeforeCanonicalReplace(bars, detectedAtUtc: first.ingestedAtUtc)
         _ = try await clickHouse.execute(rawInsert)
+        try await recordChunkOperation(
+            auditStore: auditStore,
+            mapping: mapping,
+            operationType: operationType,
+            batchId: batchId,
+            range: range,
+            status: .rawWritten,
+            stage: "raw_audit_written",
+            sourceBarCount: sourceBarCount,
+            canonicalRowCount: nil,
+            sourceHash: sourceHash
+        )
         _ = try await clickHouse.execute(canonicalDelete)
+        try await recordChunkOperation(
+            auditStore: auditStore,
+            mapping: mapping,
+            operationType: operationType,
+            batchId: batchId,
+            range: range,
+            status: .canonicalDeleted,
+            stage: "canonical_range_deleted",
+            sourceBarCount: sourceBarCount,
+            canonicalRowCount: nil,
+            sourceHash: sourceHash
+        )
         _ = try await clickHouse.execute(canonicalInsert)
+        try await recordChunkOperation(
+            auditStore: auditStore,
+            mapping: mapping,
+            operationType: operationType,
+            batchId: batchId,
+            range: range,
+            status: .canonicalWritten,
+            stage: "canonical_written",
+            sourceBarCount: sourceBarCount,
+            canonicalRowCount: bars.count,
+            sourceHash: sourceHash
+        )
         try await CanonicalInsertVerifier(clickHouse: clickHouse, insertBuilder: insertBuilder).verify(bars)
+        try await recordChunkOperation(
+            auditStore: auditStore,
+            mapping: mapping,
+            operationType: operationType,
+            batchId: batchId,
+            range: range,
+            status: .readbackVerified,
+            stage: "canonical_readback_verified",
+            sourceBarCount: sourceBarCount,
+            canonicalRowCount: bars.count,
+            sourceHash: sourceHash
+        )
+    }
+
+    private func recordChunkOperation(
+        auditStore: IngestAuditStore,
+        mapping: SymbolMapping,
+        operationType: IngestOperationType,
+        batchId: BatchId,
+        range: (from: MT5ServerSecond, toExclusive: MT5ServerSecond),
+        status: IngestOperationStatus,
+        stage: String,
+        sourceBarCount: Int?,
+        canonicalRowCount: Int?,
+        sourceHash: String?,
+        errorMessage: String? = nil
+    ) async throws {
+        try await auditStore.recordOperation(
+            brokerSourceId: config.brokerTime.brokerSourceId,
+            logicalSymbol: mapping.logicalSymbol,
+            mt5Symbol: mapping.mt5Symbol,
+            operationType: operationType,
+            batchId: batchId,
+            mt5Start: range.from,
+            mt5EndExclusive: range.toExclusive,
+            status: status,
+            stage: stage,
+            sourceBarCount: sourceBarCount,
+            canonicalRowCount: canonicalRowCount,
+            sourceHash: sourceHash,
+            errorMessage: errorMessage
+        )
     }
 
     private func validateSingleTimeResponse(_ response: SingleTimeResponseDTO, expectedMT5Symbol: MT5Symbol) throws {

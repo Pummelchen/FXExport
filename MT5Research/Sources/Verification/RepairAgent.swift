@@ -27,13 +27,30 @@ public struct RepairAgent: Sendable {
         self.logger = logger
     }
 
-    public func repairCanonicalRange(range: VerificationRange, replacementBars: [ValidatedBar], decision: RepairDecision) async throws {
+    public func repairCanonicalRange(
+        range: VerificationRange,
+        replacementBars: [ValidatedBar],
+        decision: RepairDecision,
+        sourceComplete: Bool,
+        verifiedCoverage: [VerifiedCoverageRecord]
+    ) async throws {
         switch decision {
         case .noRepairNeeded:
             return
         case .refuse(let reason):
             throw RepairError.refused(reason)
         case .repairCanonicalOnly(let reason):
+            guard sourceComplete else {
+                throw RepairError.refused("MT5 source range completeness is not proven")
+            }
+            for coverage in verifiedCoverage {
+                guard coverage.brokerSourceId == range.brokerSourceId,
+                      coverage.logicalSymbol == range.logicalSymbol,
+                      coverage.mt5Start.rawValue >= range.mt5Start.rawValue,
+                      coverage.mt5EndExclusive.rawValue <= range.mt5EndExclusive.rawValue else {
+                    throw RepairError.refused("verified coverage records do not match the requested repair range")
+                }
+            }
             let rangeLabel = OperatorStatusText.monthRangeLabel(start: range.mt5Start, endExclusive: range.mt5EndExclusive)
             logger.repair("\(range.logicalSymbol.rawValue) - repairing canonical M1 OHLC for \(rangeLabel): \(reason)")
             guard !replacementBars.isEmpty else {
@@ -53,6 +70,8 @@ public struct RepairAgent: Sendable {
             guard let first = replacementBars.first, let last = replacementBars.last else {
                 throw RepairError.refused("replacement range is empty")
             }
+            let auditStore = IngestAuditStore(clickHouse: clickHouse, database: database)
+            let sourceHash = Self.repairSourceHash(replacementBars)
             let brokerSourceId = Self.sqlLiteral(range.brokerSourceId.rawValue)
             let symbol = Self.sqlLiteral(range.logicalSymbol.rawValue)
             let deleteSQL = """
@@ -69,11 +88,80 @@ public struct RepairAgent: Sendable {
             SETTINGS mutations_sync = 1
             """
             do {
+                try await recordRepairOperation(
+                    auditStore: auditStore,
+                    range: range,
+                    mt5Symbol: first.mt5Symbol,
+                    batchId: first.batchId,
+                    status: .started,
+                    stage: "repair_started",
+                    sourceBarCount: replacementBars.count,
+                    canonicalRowCount: nil,
+                    sourceHash: sourceHash
+                )
+                try await recordRepairOperation(
+                    auditStore: auditStore,
+                    range: range,
+                    mt5Symbol: first.mt5Symbol,
+                    batchId: first.batchId,
+                    status: .sourceVerified,
+                    stage: "mt5_source_complete",
+                    sourceBarCount: replacementBars.count,
+                    canonicalRowCount: nil,
+                    sourceHash: sourceHash
+                )
                 try await CanonicalConflictRecorder(clickHouse: clickHouse, insertBuilder: insertBuilder)
                     .recordConflictsBeforeCanonicalReplace(replacementBars, detectedAtUtc: UtcSecond(rawValue: Int64(Date().timeIntervalSince1970)))
                 _ = try await clickHouse.execute(.mutation(deleteSQL, idempotent: true))
+                try await recordRepairOperation(
+                    auditStore: auditStore,
+                    range: range,
+                    mt5Symbol: first.mt5Symbol,
+                    batchId: first.batchId,
+                    status: .canonicalDeleted,
+                    stage: "canonical_range_deleted",
+                    sourceBarCount: replacementBars.count,
+                    canonicalRowCount: nil,
+                    sourceHash: sourceHash
+                )
                 _ = try await clickHouse.execute(insertQuery)
+                try await recordRepairOperation(
+                    auditStore: auditStore,
+                    range: range,
+                    mt5Symbol: first.mt5Symbol,
+                    batchId: first.batchId,
+                    status: .canonicalWritten,
+                    stage: "canonical_written",
+                    sourceBarCount: replacementBars.count,
+                    canonicalRowCount: replacementBars.count,
+                    sourceHash: sourceHash
+                )
                 try await CanonicalInsertVerifier(clickHouse: clickHouse, insertBuilder: insertBuilder).verify(replacementBars)
+                for coverage in verifiedCoverage {
+                    try await auditStore.recordVerifiedCoverage(coverage)
+                }
+                try await recordRepairOperation(
+                    auditStore: auditStore,
+                    range: range,
+                    mt5Symbol: first.mt5Symbol,
+                    batchId: first.batchId,
+                    status: .readbackVerified,
+                    stage: "canonical_readback_verified",
+                    sourceBarCount: replacementBars.count,
+                    canonicalRowCount: replacementBars.count,
+                    sourceHash: sourceHash
+                )
+                try await recordRepairOperation(
+                    auditStore: auditStore,
+                    range: range,
+                    mt5Symbol: first.mt5Symbol,
+                    batchId: first.batchId,
+                    status: .repairVerified,
+                    stage: "repair_verified",
+                    sourceBarCount: replacementBars.count,
+                    canonicalRowCount: replacementBars.count,
+                    sourceHash: sourceHash
+                )
                 try await writeRepairLog(
                     range: range,
                     decision: "repair_canonical_only",
@@ -84,6 +172,22 @@ public struct RepairAgent: Sendable {
                 logger.repair("\(range.logicalSymbol.rawValue) - \(rangeLabel) repair written and canonical readback clean")
             } catch {
                 let repairError = error
+                do {
+                    try await recordRepairOperation(
+                        auditStore: auditStore,
+                        range: range,
+                        mt5Symbol: first.mt5Symbol,
+                        batchId: first.batchId,
+                        status: .failed,
+                        stage: "repair_failed",
+                        sourceBarCount: replacementBars.count,
+                        canonicalRowCount: nil,
+                        sourceHash: sourceHash,
+                        errorMessage: String(describing: repairError)
+                    )
+                } catch {
+                    logger.warn("\(range.logicalSymbol.rawValue): failed to write repair ingest operation failure row: \(error)")
+                }
                 do {
                     try await writeRepairLog(
                         range: range,
@@ -126,6 +230,43 @@ public struct RepairAgent: Sendable {
         \(row)
         """
         _ = try await clickHouse.execute(.mutation(sql, idempotent: false))
+    }
+
+    private func recordRepairOperation(
+        auditStore: IngestAuditStore,
+        range: VerificationRange,
+        mt5Symbol: MT5Symbol,
+        batchId: BatchId,
+        status: IngestOperationStatus,
+        stage: String,
+        sourceBarCount: Int?,
+        canonicalRowCount: Int?,
+        sourceHash: String?,
+        errorMessage: String? = nil
+    ) async throws {
+        try await auditStore.recordOperation(
+            brokerSourceId: range.brokerSourceId,
+            logicalSymbol: range.logicalSymbol,
+            mt5Symbol: mt5Symbol,
+            operationType: .repair,
+            batchId: batchId,
+            mt5Start: range.mt5Start,
+            mt5EndExclusive: range.mt5EndExclusive,
+            status: status,
+            stage: stage,
+            sourceBarCount: sourceBarCount,
+            canonicalRowCount: canonicalRowCount,
+            sourceHash: sourceHash,
+            errorMessage: errorMessage
+        )
+    }
+
+    private static func repairSourceHash(_ bars: [ValidatedBar]) -> String {
+        var hasher = FNV1a64()
+        for bar in bars {
+            hasher.append(bar.barHash.description)
+        }
+        return "fnv64:" + String(format: "%016llx", hasher.value)
     }
 
     private static func sqlLiteral(_ value: String) -> String {
