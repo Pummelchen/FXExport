@@ -163,7 +163,7 @@ public enum OperationalFailureGuide {
             summary: "Swift could not accept/connect the localhost TCP bridge.",
             automaticRecovery: "The supervisor retries connection on later cycles; standalone commands print exact EA/port steps.",
             dataSafety: "No MT5-backed ingestion happens without a valid bridge.",
-            steps: ["Start MT5 under Wine.", "Attach HistoryBridgeEA.", "Match SwiftHost/SwiftPort to Config/mt5_bridge.json.", "Enable Algo Trading and localhost sockets."],
+            steps: ["Start MT5 under Wine.", "Attach FXExport.", "Match SwiftHost/SwiftPort to Config/mt5_bridge.json.", "Enable Algo Trading and localhost sockets."],
             commands: ["FXExport startcheck --config-dir Config --migrations-dir Migrations", "lsof -nP -iTCP:5055"]
         ),
         scenario(

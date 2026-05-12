@@ -434,10 +434,10 @@ final class OperationsTests: XCTestCase {
     }
 
     func testMetaEditorWinePathArgumentUsesZDriveAbsolutePath() {
-        let url = URL(fileURLWithPath: "/tmp/Project/EA/HistoryBridgeEA.mq5")
+        let url = URL(fileURLWithPath: "/tmp/Project/EA/FXExport.mq5")
         XCTAssertEqual(
             MetaEditorToolchain.winePathArgument(url),
-            "Z:\\tmp\\Project\\EA\\HistoryBridgeEA.mq5"
+            "Z:\\tmp\\Project\\EA\\FXExport.mq5"
         )
     }
 

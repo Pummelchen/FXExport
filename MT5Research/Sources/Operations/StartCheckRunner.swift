@@ -76,7 +76,7 @@ public struct StartCheckRunner: Sendable {
         if options.compileEA {
             await step("4/7 MetaEditor EA compile check", result: &result) {
                 let compiler = MetaEditorCompiler(workingDirectory: options.workingDirectory)
-                let compile = try await compiler.compileHistoryBridgeEA(timeoutSeconds: options.compileTimeoutSeconds)
+                let compile = try await compiler.compileFXExportEA(timeoutSeconds: options.compileTimeoutSeconds)
                 logger.ok("EA compiled: \(compile.outputPath.path)")
                 if !compile.logSummary.isEmpty {
                     logger.verbose(compile.logSummary)
@@ -95,7 +95,7 @@ public struct StartCheckRunner: Sendable {
 
         var bridge: MT5BridgeClient?
         await step("5/7 MT5 bridge connection and terminal identity", result: &result) {
-            logger.info("Action needed if this waits: start MT5, attach HistoryBridgeEA, allow localhost sockets, and set SwiftHost/SwiftPort from Config/mt5_bridge.json")
+            logger.info("Action needed if this waits: start MT5, attach FXExport, allow localhost sockets, and set SwiftHost/SwiftPort from Config/mt5_bridge.json")
             let connectedBridge = try bridgeConnector()
             let hello = try connectedBridge.hello()
             guard hello.schemaVersion == FramedProtocolCodec.schemaVersion else {
@@ -327,13 +327,13 @@ private enum StartCheckGuidance {
             return "Next action: confirm `/Applications/MetaTrader 5.app` exists, or set MT5RESEARCH_WINE and MT5RESEARCH_METAEDITOR before running startcheck."
         }
         if case StartCheckError.eaCompileFailed = error {
-            return "Next action: open MetaEditor, compile `MT5Research/EA/HistoryBridgeEA.mq5`, fix reported errors, then rerun startcheck."
+            return "Next action: open MetaEditor, compile `MT5Research/EA/FXExport.mq5`, fix reported errors, then rerun startcheck."
         }
         if case StartCheckError.offsetCoverageGaps = error {
             return "Next action: insert active `confidence='verified'` rows in broker_time_offsets for the exact MT5 company/server/account and every historical server-time segment before backfill."
         }
         if error is MT5BridgeError || error is ProtocolError {
-            return "Next action: start MT5, attach the compiled HistoryBridgeEA to a chart, enable localhost sockets, then rerun startcheck."
+            return "Next action: start MT5, attach the compiled FXExport EA to a chart, enable localhost sockets, then rerun startcheck."
         }
         if error is BrokerOffsetStoreError || error is BrokerOffsetRuntimeError || error is TimeMappingError {
             return "Next action: inspect broker_time_offsets for the connected MT5 identity and verify live server offset through the EA."
@@ -355,8 +355,8 @@ public struct MetaEditorCompiler: Sendable {
         self.workingDirectory = workingDirectory
     }
 
-    public func compileHistoryBridgeEA(timeoutSeconds: TimeInterval) async throws -> MetaEditorCompileResult {
-        let source = try locateHistoryBridgeSource()
+    public func compileFXExportEA(timeoutSeconds: TimeInterval) async throws -> MetaEditorCompileResult {
+        let source = try locateFXExportSource()
         let toolchain = try MetaEditorToolchain.locate(from: source)
         let stage = try Self.createCompileStage(for: source)
         let logPath = stage.source.deletingLastPathComponent().appendingPathComponent("compile.log")
@@ -364,7 +364,7 @@ public struct MetaEditorCompiler: Sendable {
         let liveOutput = source.deletingPathExtension().appendingPathExtension("ex5")
         let stageOutput = stage.source.deletingPathExtension().appendingPathExtension("ex5")
         let stdoutPath = FileManager.default.temporaryDirectory
-            .appendingPathComponent("FXExport-HistoryBridgeEA-stdout-\(UUID().uuidString).log")
+            .appendingPathComponent("FXExport-EA-stdout-\(UUID().uuidString).log")
         guard FileManager.default.createFile(atPath: stdoutPath.path, contents: nil) else {
             throw StartCheckError.eaCompileFailed("Could not create MetaEditor output log at \(stdoutPath.path)")
         }
@@ -427,23 +427,23 @@ public struct MetaEditorCompiler: Sendable {
         let outputText = Self.readPlainText(stdoutPath) ?? ""
         let logText = Self.readCompileLog(logPath) ?? lastLog
         let detail = Self.summary(from: logText).isEmpty ? outputText : Self.summary(from: logText)
-        throw StartCheckError.eaCompileFailed("MetaEditor compile did not produce a clean HistoryBridgeEA.ex5. Compile log: \(logPath.path). \(detail)")
+        throw StartCheckError.eaCompileFailed("MetaEditor compile did not produce a clean FXExport.ex5. Compile log: \(logPath.path). \(detail)")
     }
 
-    private func locateHistoryBridgeSource() throws -> URL {
+    private func locateFXExportSource() throws -> URL {
         let candidates = [
-            workingDirectory.appendingPathComponent("EA/HistoryBridgeEA.mq5"),
-            workingDirectory.appendingPathComponent("MT5Research/EA/HistoryBridgeEA.mq5")
+            workingDirectory.appendingPathComponent("EA/FXExport.mq5"),
+            workingDirectory.appendingPathComponent("MT5Research/EA/FXExport.mq5")
         ]
         if let candidate = candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }) {
             return candidate
         }
-        throw StartCheckError.eaSourceNotFound("Could not find HistoryBridgeEA.mq5 from \(workingDirectory.path)")
+        throw StartCheckError.eaSourceNotFound("Could not find FXExport.mq5 from \(workingDirectory.path)")
     }
 
     private static func createCompileStage(for source: URL) throws -> (directory: URL, source: URL) {
         let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("FXExport-HistoryBridgeEA-stage-\(UUID().uuidString)")
+            .appendingPathComponent("FXExport-EA-stage-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let stagedSource = directory.appendingPathComponent(source.lastPathComponent)
         try FileManager.default.copyItem(at: source, to: stagedSource)

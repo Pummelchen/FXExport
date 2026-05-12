@@ -6,7 +6,7 @@ Start here:
 
 - [MT5Research README](MT5Research/README.md)
 - Swift package: `MT5Research/Package.swift`
-- MT5 bridge EA: `MT5Research/EA/HistoryBridgeEA.mq5`
+- MT5 bridge EA: `MT5Research/EA/FXExport.mq5`
 - ClickHouse migrations: `MT5Research/Migrations/`
 
 Validation commands:

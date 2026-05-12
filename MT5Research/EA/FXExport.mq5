@@ -1,6 +1,6 @@
 #property strict
 #property version   "1.000"
-#property description "MT5Research localhost history bridge. Swift owns validation, storage, checkpoints, verification, and repair."
+#property description "FXExport localhost history bridge. Swift owns validation, storage, checkpoints, verification, and repair."
 
 input string SwiftHost = "127.0.0.1";
 input ushort SwiftPort = 5055;
@@ -15,7 +15,7 @@ bool g_connected = false;
 int OnInit()
 {
    EventSetTimer(TimerSeconds);
-   Print("MT5Research HistoryBridgeEA initialized. Waiting to connect to Swift at ", SwiftHost, ":", SwiftPort);
+   Print("FXExport EA initialized. Waiting to connect to Swift at ", SwiftHost, ":", SwiftPort);
    return(INIT_SUCCEEDED);
 }
 
@@ -142,7 +142,7 @@ void HandleRequest(const string json)
    }
 
    if(command == "HELLO")
-      SendOK(requestId, command, "{\"bridge_name\":\"HistoryBridgeEA\",\"bridge_version\":\"0.1\",\"schema_version\":1}");
+      SendOK(requestId, command, "{\"bridge_name\":\"FXExport\",\"bridge_version\":\"0.1\",\"schema_version\":1}");
    else if(command == "PING")
       SendOK(requestId, command, "{}");
    else if(command == "GET_TERMINAL_INFO")

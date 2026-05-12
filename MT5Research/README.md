@@ -18,7 +18,7 @@ The implementation is intentionally defensive:
 
 The system has two parts:
 
-1. `EA/HistoryBridgeEA.mq5`
+1. `EA/FXExport.mq5`
    - Runs inside MetaTrader 5.
    - Connects to the Swift process over localhost TCP.
    - Uses MT5 history APIs such as `CopyRates`.
@@ -78,13 +78,13 @@ swift build -c release
 ```
 
 3. Copy and edit the local configs in `Config/`. Keep the ClickHouse password only in `Config/clickhouse.json`; this directory is ignored by Git.
-4. Run the database and EA preflight. This applies idempotent migrations, verifies required tables, runs DB-only integrity checks, and compiles `HistoryBridgeEA.mq5` through MetaEditor from the terminal:
+4. Run the database and EA preflight. This applies idempotent migrations, verifies required tables, runs DB-only integrity checks, and compiles `FXExport.mq5` through MetaEditor from the terminal:
 
 ```bash
 .build/release/FXExport startcheck --config-dir Config --migrations-dir Migrations --skip-bridge
 ```
 
-5. Attach the compiled `HistoryBridgeEA` in MT5. Set `SwiftHost = 127.0.0.1` and `SwiftPort = 5055`, then allow localhost sockets in MT5/Wine if prompted.
+5. Attach the compiled `FXExport` EA in MT5. Set `SwiftHost = 127.0.0.1` and `SwiftPort = 5055`, then allow localhost sockets in MT5/Wine if prompted.
 6. Run the full go-live gate. This repeats the DB and EA compile checks, waits for the EA socket, verifies the connected MT5 terminal identity, checks the live server offset through the EA, proves verified offset coverage for the configured MT5 history, and tests `GET_RATES_FROM_POSITION` with `start_pos=1` so the open M1 bar is excluded:
 
 ```bash
@@ -282,13 +282,13 @@ Raw audit rows are append-only. A crash/retry may leave repeated raw audit attem
 
 ## MT5 EA Setup
 
-Keep `EA/HistoryBridgeEA.mq5` under the MT5 `MQL5/Experts` tree and let `startcheck` compile it through MetaEditor:
+Keep `EA/FXExport.mq5` under the MT5 `MQL5/Experts` tree and let `startcheck` compile it through MetaEditor:
 
 ```bash
 .build/release/FXExport startcheck --config-dir Config --migrations-dir Migrations --skip-bridge
 ```
 
-If your package is outside the MT5 Experts tree, copy `EA/HistoryBridgeEA.mq5` into `MQL5/Experts` first or set `MT5RESEARCH_METAEDITOR`, `MT5RESEARCH_WINE`, and `MT5RESEARCH_WINEPREFIX` so the terminal compile check can find the MT5 toolchain.
+If your package is outside the MT5 Experts tree, copy `EA/FXExport.mq5` into `MQL5/Experts` first or set `MT5RESEARCH_METAEDITOR`, `MT5RESEARCH_WINE`, and `MT5RESEARCH_WINEPREFIX` so the terminal compile check can find the MT5 toolchain.
 
 Attach it to a chart and enable socket/network permissions required by your MT5/Wine setup. Configure:
 

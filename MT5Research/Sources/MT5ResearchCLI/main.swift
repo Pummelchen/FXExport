@@ -722,7 +722,7 @@ private struct MT5BridgeStartupError: Error, CustomStringConvertible {
             Next steps:
               1. Check what owns the port: lsof -nP -iTCP:\(config.port) -sTCP:LISTEN
               2. Stop the other FXExport process, or change Config/mt5_bridge.json to another free port.
-              3. Reattach HistoryBridgeEA with the same SwiftHost/SwiftPort values.
+              3. Reattach FXExport with the same SwiftHost/SwiftPort values.
               4. Rerun: FXExport startcheck --config-dir Config --migrations-dir Migrations
             """
         case .acceptTimedOut:
@@ -754,7 +754,7 @@ private struct MT5BridgeStartupError: Error, CustomStringConvertible {
         Reason: \(reason)
         Next steps:
           1. Start MetaTrader 5 under Wine.
-          2. Attach the compiled HistoryBridgeEA to any chart.
+          2. Attach the compiled FXExport EA to any chart.
           3. In the EA inputs set SwiftHost=\(config.host) and SwiftPort=\(config.port).
           4. Enable Algo Trading and allow localhost/socket access in MT5/Wine when prompted.
           5. Leave this Swift command running while the EA connects, or rerun: FXExport startcheck --config-dir Config --migrations-dir Migrations
