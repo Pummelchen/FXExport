@@ -579,7 +579,10 @@ public struct FXBacktestExecutionSymbolSpec: Codable, Equatable, Sendable {
             tickValueLoss,
             commissionPerLotPerSide
         ]
-        guard optionalValues.allSatisfy({ $0 == nil || $0!.isFinite }) else {
+        guard optionalValues.allSatisfy({ value in
+            guard let value else { return true }
+            return value.isFinite
+        }) else {
             throw FXBacktestAPIValidationError.invalidField("\(logicalSymbol) optional execution values must be finite when present")
         }
         guard marginCalcLots.isFinite, marginCalcLots > 0 else {

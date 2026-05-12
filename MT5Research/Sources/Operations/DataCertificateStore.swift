@@ -70,7 +70,7 @@ public struct DataCertificateStore: Sendable {
         guard !rows.isEmpty else {
             throw DataCertificateError.missingVerifiedCoverage(logicalSymbol, utcStart, utcEndExclusive)
         }
-        try validateCompleteCoverage(
+        let selectedRows = try selectCompleteCoverageRows(
             rows: rows,
             logicalSymbol: logicalSymbol,
             utcStart: utcStart,
@@ -81,9 +81,9 @@ public struct DataCertificateStore: Sendable {
             logicalSymbol: logicalSymbol,
             utcStart: utcStart,
             utcEndExclusive: utcEndExclusive,
-            rows: rows
+            rows: selectedRows
         )
-        try await insert(certificate, rows: rows, createdAtUtc: createdAtUtc)
+        try await insert(certificate, rows: selectedRows, createdAtUtc: createdAtUtc)
         return certificate
     }
 
@@ -117,45 +117,52 @@ public struct DataCertificateStore: Sendable {
             .map { try CoverageCertificateRow.parse(String($0)) }
     }
 
-    private func validateCompleteCoverage(
+    private func selectCompleteCoverageRows(
         rows: [CoverageCertificateRow],
         logicalSymbol: LogicalSymbol,
         utcStart: UtcSecond,
         utcEndExclusive: UtcSecond
-    ) throws {
-        var cursor = utcStart.rawValue
+    ) throws -> [CoverageCertificateRow] {
         for row in rows {
-            guard row.sourceBarCount == row.canonicalRowCount,
-                  row.sourceBarCount > 0,
-                  row.canonicalRowCount > 0 else {
-                throw DataCertificateError.inconsistentCoverageCounts(logicalSymbol, row.rawRow)
-            }
-            guard row.timeframe == Timeframe.m1.rawValue,
-                  row.utcStart < row.utcEndExclusive,
-                  row.utcStart % 60 == 0,
-                  row.utcEndExclusive % 60 == 0 else {
-                throw DataCertificateError.invalidCoverageRow(row.rawRow)
-            }
-            if row.utcEndExclusive <= cursor {
-                continue
-            }
-            guard row.utcStart <= cursor else {
+            try validateCoverageRow(row, logicalSymbol: logicalSymbol)
+        }
+        let sorted = rows.sorted { lhs, rhs in
+            if lhs.utcStart != rhs.utcStart { return lhs.utcStart < rhs.utcStart }
+            if lhs.utcEndExclusive != rhs.utcEndExclusive { return lhs.utcEndExclusive > rhs.utcEndExclusive }
+            return lhs.verifiedAtUtc > rhs.verifiedAtUtc
+        }
+        var cursor = utcStart.rawValue
+        var selected: [CoverageCertificateRow] = []
+        while cursor < utcEndExclusive.rawValue {
+            let candidates = sorted.filter { $0.utcStart <= cursor && $0.utcEndExclusive > cursor }
+            guard let best = candidates.max(by: { lhs, rhs in
+                if lhs.utcEndExclusive != rhs.utcEndExclusive { return lhs.utcEndExclusive < rhs.utcEndExclusive }
+                return lhs.verifiedAtUtc < rhs.verifiedAtUtc
+            }) else {
                 throw DataCertificateError.incompleteVerifiedCoverage(
                     logicalSymbol,
                     UtcSecond(rawValue: cursor),
-                    UtcSecond(rawValue: min(row.utcStart, utcEndExclusive.rawValue))
+                    utcEndExclusive
                 )
             }
-            cursor = max(cursor, row.utcEndExclusive)
-            if cursor >= utcEndExclusive.rawValue {
-                return
-            }
+            selected.append(best)
+            cursor = max(cursor, best.utcEndExclusive)
         }
-        throw DataCertificateError.incompleteVerifiedCoverage(
-            logicalSymbol,
-            UtcSecond(rawValue: cursor),
-            utcEndExclusive
-        )
+        return selected
+    }
+
+    private func validateCoverageRow(_ row: CoverageCertificateRow, logicalSymbol: LogicalSymbol) throws {
+        guard row.sourceBarCount == row.canonicalRowCount,
+              row.sourceBarCount > 0,
+              row.canonicalRowCount > 0 else {
+            throw DataCertificateError.inconsistentCoverageCounts(logicalSymbol, row.rawRow)
+        }
+        guard row.timeframe == Timeframe.m1.rawValue,
+              row.utcStart < row.utcEndExclusive,
+              row.utcStart % 60 == 0,
+              row.utcEndExclusive % 60 == 0 else {
+            throw DataCertificateError.invalidCoverageRow(row.rawRow)
+        }
     }
 
     private func buildCertificate(
@@ -192,8 +199,6 @@ public struct DataCertificateStore: Sendable {
             hasher.appendField("verified_at_utc", row.verifiedAtUtc)
         }
 
-        let first = rows.map(\.utcStart).min() ?? utcStart.rawValue
-        let lastExclusive = rows.map(\.utcEndExclusive).max() ?? utcEndExclusive.rawValue
         return DataCertificate(
             brokerSourceId: brokerSourceId,
             logicalSymbol: logicalSymbol,
@@ -203,8 +208,8 @@ public struct DataCertificateStore: Sendable {
             coverageRowCount: UInt32(rows.count),
             coverageSourceBarCount: rows.reduce(UInt64(0)) { $0 + UInt64($1.sourceBarCount) },
             coverageCanonicalRowCount: rows.reduce(UInt64(0)) { $0 + UInt64($1.canonicalRowCount) },
-            firstCoveredUtc: UtcSecond(rawValue: first),
-            lastCoveredUtc: UtcSecond(rawValue: max(first, lastExclusive - 60))
+            firstCoveredUtc: utcStart,
+            lastCoveredUtc: UtcSecond(rawValue: utcEndExclusive.rawValue - 60)
         )
     }
 

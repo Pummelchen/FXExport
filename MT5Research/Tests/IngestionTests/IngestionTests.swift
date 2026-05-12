@@ -11,7 +11,7 @@ final class IngestionTests: XCTestCase {
         let identity = try BrokerServerIdentity(company: "Raw Trading Ltd", server: "ICMarketsSC-MT5-4", accountLogin: 12345678)
         let brokerSourceId = try BrokerSourceRegistry.deriveBrokerSourceId(from: identity)
 
-        XCTAssertEqual(brokerSourceId.rawValue, "icmarkets-sc-mt5-4-account-12345678")
+        XCTAssertEqual(brokerSourceId.rawValue, "raw-trading-ltd-icmarkets-sc-mt5-4-account-12345678")
     }
 
     func testBrokerOffsetPolicyKnowsICMarketsLiveOffsets() throws {
@@ -21,6 +21,90 @@ final class IngestionTests: XCTestCase {
             BrokerOffsetPolicy.acceptedLiveOffsets(for: identity),
             [OffsetSeconds(rawValue: 7_200), OffsetSeconds(rawValue: 10_800)]
         )
+    }
+
+    func testBrokerOffsetPolicyBuildsICMarketsUSDSTHistoricalSegments() throws {
+        let broker = try BrokerSourceId("raw-trading-ltd-icmarkets-sc-mt5-4-account-12345678")
+        let identity = try BrokerServerIdentity(company: "Raw Trading Ltd", server: "ICMarketsSC-MT5-4", accountLogin: 12345678)
+
+        let segments = try BrokerOffsetPolicy.historicalSegments(
+            for: identity,
+            brokerSourceId: broker,
+            covering: MT5ServerSecond(rawValue: 1_772_841_600),
+            to: MT5ServerSecond(rawValue: 1_773_014_400)
+        )
+
+        XCTAssertEqual(segments.map(\.validFrom.rawValue), [1_772_841_600, 1_772_928_000])
+        XCTAssertEqual(segments.map(\.validTo.rawValue), [1_772_928_000, 1_773_014_400])
+        XCTAssertEqual(segments.map(\.offset.rawValue), [7_200, 10_800])
+        XCTAssertTrue(segments.allSatisfy { $0.source == .brokerPolicy && $0.confidence == .verified })
+    }
+
+    func testHistoricalPolicyAuthorityInsertsOnlyMissingNonOverlappingICMarketsSegments() async throws {
+        let broker = try BrokerSourceId("raw-trading-ltd-icmarkets-sc-mt5-4-account-12345678")
+        let identity = try BrokerServerIdentity(company: "Raw Trading Ltd", server: "ICMarketsSC-MT5-4", accountLogin: 12345678)
+        let client = SequenceClickHouseClient(bodies: [
+            "1772841600\t1772928000\t7200\n",
+            ""
+        ])
+
+        let inserted = try await BrokerOffsetHistoricalPolicyAuthority(clickHouse: client, database: "db").ensureHistoricalCoverageIfKnown(
+            brokerSourceId: broker,
+            terminalIdentity: identity,
+            requiredFrom: MT5ServerSecond(rawValue: 1_772_841_600),
+            requiredToExclusive: MT5ServerSecond(rawValue: 1_773_014_400),
+            liveSnapshot: ServerTimeSnapshotDTO(timeTradeServer: 1_778_673_600, timeGMT: 1_778_662_800, timeLocal: 1),
+            now: UtcSecond(rawValue: 2_000)
+        )
+
+        let queries = await client.allQueries()
+        XCTAssertEqual(inserted, 1)
+        XCTAssertEqual(queries.count, 2)
+        XCTAssertTrue(queries[1].contains("INSERT INTO db.broker_time_offsets"))
+        XCTAssertTrue(queries[1].contains("\t1772928000\t1773014400\t10800\t"))
+        XCTAssertTrue(queries[1].contains("\tbroker_policy\tverified\t"))
+    }
+
+    func testHistoricalPolicyAuthorityRejectsExistingVerifiedOffsetThatContradictsICMarketsPolicy() async throws {
+        let broker = try BrokerSourceId("raw-trading-ltd-icmarkets-sc-mt5-4-account-12345678")
+        let identity = try BrokerServerIdentity(company: "Raw Trading Ltd", server: "ICMarketsSC-MT5-4", accountLogin: 12345678)
+        let client = SequenceClickHouseClient(bodies: [
+            "1772928000\t1773014400\t7200\n"
+        ])
+
+        await XCTAssertThrowsErrorAsync(try await BrokerOffsetHistoricalPolicyAuthority(clickHouse: client, database: "db").ensureHistoricalCoverageIfKnown(
+            brokerSourceId: broker,
+            terminalIdentity: identity,
+            requiredFrom: MT5ServerSecond(rawValue: 1_772_841_600),
+            requiredToExclusive: MT5ServerSecond(rawValue: 1_773_014_400),
+            liveSnapshot: ServerTimeSnapshotDTO(timeTradeServer: 1_778_673_600, timeGMT: 1_778_662_800, timeLocal: 1),
+            now: UtcSecond(rawValue: 2_000)
+        )) { error in
+            guard case BrokerOffsetHistoricalPolicyAuthorityError.existingVerifiedSegmentContradictsPolicy = error else {
+                XCTFail("Expected existingVerifiedSegmentContradictsPolicy, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testHistoricalPolicyAuthorityRejectsLiveSnapshotThatDoesNotMatchICMarketsPolicy() async throws {
+        let broker = try BrokerSourceId("raw-trading-ltd-icmarkets-sc-mt5-4-account-12345678")
+        let identity = try BrokerServerIdentity(company: "Raw Trading Ltd", server: "ICMarketsSC-MT5-4", accountLogin: 12345678)
+        let client = SequenceClickHouseClient(bodies: [])
+
+        await XCTAssertThrowsErrorAsync(try await BrokerOffsetHistoricalPolicyAuthority(clickHouse: client, database: "db").ensureHistoricalCoverageIfKnown(
+            brokerSourceId: broker,
+            terminalIdentity: identity,
+            requiredFrom: MT5ServerSecond(rawValue: 1_772_841_600),
+            requiredToExclusive: MT5ServerSecond(rawValue: 1_773_014_400),
+            liveSnapshot: ServerTimeSnapshotDTO(timeTradeServer: 1_778_673_600, timeGMT: 1_778_666_400, timeLocal: 1),
+            now: UtcSecond(rawValue: 2_000)
+        )) { error in
+            guard case BrokerOffsetHistoricalPolicyAuthorityError.liveSnapshotPolicyMismatch = error else {
+                XCTFail("Expected liveSnapshotPolicyMismatch, got \(error)")
+                return
+            }
+        }
     }
 
     func testBatchBuilderRange() {
@@ -134,6 +218,28 @@ final class IngestionTests: XCTestCase {
         let identity = try BrokerServerIdentity(company: "Broker Ltd", server: "Broker-Server", accountLogin: 12345)
         await XCTAssertThrowsErrorAsync(try await ClickHouseBrokerOffsetStore(client: client, database: "db")
             .loadVerifiedOffsetMap(brokerSourceId: broker, terminalIdentity: identity))
+    }
+
+    func testBrokerOffsetAutoAuthorityAvoidsOverlappingExistingLiveDaySegments() async throws {
+        let broker = try BrokerSourceId("demo")
+        let identity = try BrokerServerIdentity(company: "Broker Ltd", server: "Broker-Server", accountLogin: 12345)
+        let client = SequenceClickHouseClient(bodies: [
+            "0\t43200\t7200\n",
+            ""
+        ])
+        try await BrokerOffsetAutoAuthority(clickHouse: client, database: "db").ensureLiveSegmentIfMissing(
+            brokerSourceId: broker,
+            terminalIdentity: identity,
+            snapshot: ServerTimeSnapshotDTO(timeTradeServer: 50_400, timeGMT: 43_200, timeLocal: 1),
+            now: UtcSecond(rawValue: 1_000)
+        )
+
+        let queries = await client.allQueries()
+        XCTAssertEqual(queries.count, 2)
+        XCTAssertTrue(queries[0].contains("valid_to_mt5_server_ts > 0"))
+        XCTAssertTrue(queries[0].contains("valid_from_mt5_server_ts < 86400"))
+        XCTAssertTrue(queries[1].contains("INSERT INTO db.broker_time_offsets"))
+        XCTAssertTrue(queries[1].contains("\t43200\t86400\t7200\t"))
     }
 
     func testCanonicalInsertVerifierComparesReadbackHashes() async throws {

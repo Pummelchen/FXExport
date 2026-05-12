@@ -145,6 +145,12 @@ public struct StartCheckRunner: Sendable {
                 terminalIdentity: identity,
                 snapshot: liveSnapshot
             )
+            try await ensureAutomaticHistoricalOffsetAuthority(
+                bridge: bridge,
+                identity: identity,
+                liveSnapshot: liveSnapshot,
+                config: activeConfig
+            )
             let offsetMap = try await ClickHouseBrokerOffsetStore(client: clickHouse, database: config.clickHouse.database)
                 .loadVerifiedOffsetMap(
                     brokerSourceId: activeConfig.brokerTime.brokerSourceId,
@@ -175,6 +181,59 @@ public struct StartCheckRunner: Sendable {
             result.failureCount += 1
             logger.error("STARTCHECK \(title) failed: \(error)")
             logger.info(StartCheckGuidance.guidance(for: error))
+        }
+    }
+
+    private func ensureAutomaticHistoricalOffsetAuthority(
+        bridge: MT5BridgeClient,
+        identity: BrokerServerIdentity,
+        liveSnapshot: ServerTimeSnapshotDTO,
+        config: ConfigBundle
+    ) async throws {
+        guard BrokerOffsetPolicy.hasAutomaticHistoricalPolicy(for: identity) else {
+            logger.info("No code-owned historical UTC offset policy for \(identity); startcheck will require existing audited broker_time_offsets rows")
+            return
+        }
+        var requiredFrom: MT5ServerSecond?
+        var requiredTo: MT5ServerSecond?
+        for mapping in config.symbols.symbols {
+            let info = try bridge.prepareSymbol(mapping.mt5Symbol)
+            guard info.selected, info.digits == mapping.digits.rawValue else {
+                throw StartCheckError.invalidBridge("\(mapping.mt5Symbol.rawValue) is not prepared with configured digits before automatic offset policy setup")
+            }
+            let status = try bridge.historyStatus(mapping.mt5Symbol)
+            guard status.mt5Symbol == mapping.mt5Symbol.rawValue,
+                  status.synchronized,
+                  status.bars > 0 else {
+                throw StartCheckError.invalidBridge("\(mapping.mt5Symbol.rawValue) M1 history is not synchronized in MT5 before automatic offset policy setup")
+            }
+            let oldest = try bridge.oldestM1BarTime(mapping.mt5Symbol)
+            let latest = try bridge.latestClosedM1Bar(mapping.mt5Symbol)
+            guard oldest.mt5Symbol == mapping.mt5Symbol.rawValue,
+                  latest.mt5Symbol == mapping.mt5Symbol.rawValue else {
+                throw StartCheckError.invalidBridge("symbol mismatch while preparing automatic offset policy for \(mapping.logicalSymbol.rawValue)")
+            }
+            let oldestTime = MT5ServerSecond(rawValue: oldest.mt5ServerTime)
+            let latestExclusive = try Self.addOneMinute(latest.mt5ServerTime)
+            requiredFrom = MT5ServerSecond(rawValue: min(requiredFrom?.rawValue ?? oldestTime.rawValue, oldestTime.rawValue))
+            requiredTo = MT5ServerSecond(rawValue: max(requiredTo?.rawValue ?? latestExclusive.rawValue, latestExclusive.rawValue))
+        }
+        guard let requiredFrom, let requiredTo, requiredFrom.rawValue < requiredTo.rawValue else {
+            throw StartCheckError.invalidBridge("could not discover MT5 history range for automatic offset policy setup")
+        }
+        let inserted = try await BrokerOffsetHistoricalPolicyAuthority(
+            clickHouse: clickHouse,
+            database: config.clickHouse.database,
+            logger: logger
+        ).ensureHistoricalCoverageIfKnown(
+            brokerSourceId: config.brokerTime.brokerSourceId,
+            terminalIdentity: identity,
+            requiredFrom: requiredFrom,
+            requiredToExclusive: requiredTo,
+            liveSnapshot: liveSnapshot
+        )
+        if inserted == 0 {
+            logger.ok("Automatic historical broker UTC authority already covers \(requiredFrom.rawValue)..<\(requiredTo.rawValue)")
         }
     }
 
@@ -354,7 +413,7 @@ private enum StartCheckGuidance {
             return "Next action: open MetaEditor, compile `MT5Research/EA/FXExport.mq5`, fix reported errors, then rerun startcheck."
         }
         if case StartCheckError.offsetCoverageGaps = error {
-            return "Next action: insert active `confidence='verified'` rows in broker_time_offsets for the exact MT5 company/server/account and every historical server-time segment before backfill."
+            return "Next action: rerun startcheck with the EA connected. Known broker policies are inserted automatically after live EA verification; unknown brokers or mismatched policies require audited active `confidence='verified'` broker_time_offsets rows for the exact MT5 company/server/account."
         }
         if error is MT5BridgeError || error is ProtocolError {
             return "Next action: start MT5, attach the compiled FXExport EA to a chart, enable localhost sockets, then rerun startcheck."

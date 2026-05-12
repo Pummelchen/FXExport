@@ -70,6 +70,7 @@ public struct ClickHouseHistoricalOhlcDataProvider: HistoricalOhlcDataProviding 
             throw HistoryDataError.invalidRequest("maximumRows is too large.")
         }
         try await validateVerifiedCoverage(request)
+        try await validateDataCertificates(request)
         let body = try await client.execute(.select(try sql(for: request, limit: limit + 1)))
         let rows = try parseRows(body, request: request)
         guard rows.count <= limit else {
@@ -165,6 +166,47 @@ public struct ClickHouseHistoricalOhlcDataProvider: HistoricalOhlcDataProviding 
             }
         }
         throw HistoryDataError.missingVerifiedCoverage(
+            request.logicalSymbol,
+            UtcSecond(rawValue: cursor),
+            request.utcEndExclusive
+        )
+    }
+
+    private func validateDataCertificates(_ request: HistoricalOhlcRequest) async throws {
+        let databaseName = try Self.sqlIdentifier(database)
+        let body = try await client.execute(.select("""
+        SELECT utc_range_start, utc_range_end_exclusive
+        FROM \(databaseName).data_certificates
+        WHERE broker_source_id = '\(Self.sqlLiteral(request.brokerSourceId.rawValue))'
+          AND logical_symbol = '\(Self.sqlLiteral(request.logicalSymbol.rawValue))'
+          AND timeframe = 'M1'
+          AND certificate_status = 'valid'
+          AND hash_schema_version = '\(Self.sqlLiteral(ChunkHashSchemaVersion.sha256V1))'
+          AND length(certificate_sha256) = 64
+          AND length(mt5_source_sha256_aggregate) = 64
+          AND length(canonical_readback_sha256_aggregate) = 64
+          AND length(offset_authority_sha256_aggregate) = 64
+          AND utc_range_end_exclusive > \(request.utcStartInclusive.rawValue)
+          AND utc_range_start < \(request.utcEndExclusive.rawValue)
+        ORDER BY utc_range_start ASC, utc_range_end_exclusive ASC
+        FORMAT TabSeparated
+        """))
+        let intervals = try parseCoverageIntervals(body)
+        var cursor = request.utcStartInclusive.rawValue
+        for interval in intervals where interval.end > cursor {
+            guard interval.start <= cursor else {
+                throw HistoryDataError.missingDataCertificate(
+                    request.logicalSymbol,
+                    UtcSecond(rawValue: cursor),
+                    UtcSecond(rawValue: min(interval.start, request.utcEndExclusive.rawValue))
+                )
+            }
+            cursor = max(cursor, interval.end)
+            if cursor >= request.utcEndExclusive.rawValue {
+                return
+            }
+        }
+        throw HistoryDataError.missingDataCertificate(
             request.logicalSymbol,
             UtcSecond(rawValue: cursor),
             request.utcEndExclusive

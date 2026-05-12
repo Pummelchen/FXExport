@@ -7,6 +7,7 @@ import MT5Bridge
 public enum BrokerOffsetAutoAuthorityError: Error, CustomStringConvertible, Sendable {
     case invalidExistingRow(String)
     case multipleActiveSegments(BrokerSourceId, BrokerServerIdentity, MT5ServerSecond)
+    case noNonOverlappingLiveInterval(BrokerSourceId, BrokerServerIdentity, MT5ServerSecond)
 
     public var description: String {
         switch self {
@@ -14,6 +15,8 @@ public enum BrokerOffsetAutoAuthorityError: Error, CustomStringConvertible, Send
             return "Invalid broker_time_offsets row while checking automatic live offset authority: \(row)"
         case .multipleActiveSegments(let brokerSourceId, let identity, let serverTime):
             return "Multiple active verified broker UTC offset segments cover live server timestamp \(serverTime.rawValue) for \(brokerSourceId.rawValue), \(identity)."
+        case .noNonOverlappingLiveInterval(let brokerSourceId, let identity, let serverTime):
+            return "Could not derive a non-overlapping automatic live UTC offset interval for server timestamp \(serverTime.rawValue) for \(brokerSourceId.rawValue), \(identity)."
         }
     }
 }
@@ -31,8 +34,8 @@ public struct BrokerOffsetAutoAuthority: Sendable {
 
     /// Records a verified current-day broker offset segment only when no active verified
     /// segment covers the EA-observed live MT5 server time. This deliberately does not
-    /// invent historical DST/server segments; historical canonical ingestion still requires
-    /// audited coverage already present in ClickHouse.
+    /// invent historical DST/server segments; historical canonical ingestion is handled by
+    /// audited ClickHouse rows or a separate broker-specific policy authority.
     public func ensureLiveSegmentIfMissing(
         brokerSourceId: BrokerSourceId,
         terminalIdentity: BrokerServerIdentity,
@@ -45,15 +48,19 @@ public struct BrokerOffsetAutoAuthority: Sendable {
         if !accepted.isEmpty && !accepted.contains(observed) {
             throw BrokerOffsetRuntimeError.observedOffsetNotAccepted(observed, accepted: accepted)
         }
+        let dayStart = Self.serverDayStart(containing: serverTime)
+        let dayEnd = MT5ServerSecond(rawValue: dayStart.rawValue + 86_400)
         let existing = try await activeVerifiedSegments(
             brokerSourceId: brokerSourceId,
             terminalIdentity: terminalIdentity,
-            containing: serverTime
+            overlappingFrom: dayStart,
+            to: dayEnd
         )
-        if existing.count > 1 {
+        let containing = existing.filter { $0.contains(serverTime) }
+        if containing.count > 1 {
             throw BrokerOffsetAutoAuthorityError.multipleActiveSegments(brokerSourceId, terminalIdentity, serverTime)
         }
-        if let existingSegment = existing.first {
+        if let existingSegment = containing.first {
             guard existingSegment.offset == observed else {
                 throw BrokerOffsetRuntimeError.liveOffsetMismatch(
                     observed: observed,
@@ -64,24 +71,31 @@ public struct BrokerOffsetAutoAuthority: Sendable {
             return
         }
 
-        let dayStart = Self.serverDayStart(containing: serverTime)
-        let dayEnd = MT5ServerSecond(rawValue: dayStart.rawValue + 86_400)
+        let interval = try Self.nonOverlappingInterval(
+            containing: serverTime,
+            dayStart: dayStart,
+            dayEnd: dayEnd,
+            existing: existing,
+            brokerSourceId: brokerSourceId,
+            terminalIdentity: terminalIdentity
+        )
         try await insertLiveSegment(
             brokerSourceId: brokerSourceId,
             terminalIdentity: terminalIdentity,
-            validFrom: dayStart,
-            validTo: dayEnd,
+            validFrom: interval.validFrom,
+            validTo: interval.validTo,
             offset: observed,
             snapshot: snapshot,
             now: now
         )
-        logger?.ok("Automatic broker UTC authority recorded: \(brokerSourceId.rawValue) \(terminalIdentity) offset \(observed.rawValue) seconds for live server day \(dayStart.rawValue)..<\(dayEnd.rawValue)")
+        logger?.ok("Automatic broker UTC authority recorded: \(brokerSourceId.rawValue) \(terminalIdentity) offset \(observed.rawValue) seconds for live server interval \(interval.validFrom.rawValue)..<\(interval.validTo.rawValue)")
     }
 
     private func activeVerifiedSegments(
         brokerSourceId: BrokerSourceId,
         terminalIdentity: BrokerServerIdentity,
-        containing serverTime: MT5ServerSecond
+        overlappingFrom validFrom: MT5ServerSecond,
+        to validTo: MT5ServerSecond
     ) async throws -> [ExistingOffsetSegment] {
         let body = try await clickHouse.execute(.select("""
         SELECT valid_from_mt5_server_ts, valid_to_mt5_server_ts, offset_seconds
@@ -92,10 +106,9 @@ public struct BrokerOffsetAutoAuthority: Sendable {
           AND mt5_account_login = \(terminalIdentity.accountLogin)
           AND confidence = 'verified'
           AND is_active = 1
-          AND valid_from_mt5_server_ts <= \(serverTime.rawValue)
-          AND valid_to_mt5_server_ts > \(serverTime.rawValue)
+          AND valid_to_mt5_server_ts > \(validFrom.rawValue)
+          AND valid_from_mt5_server_ts < \(validTo.rawValue)
         ORDER BY valid_from_mt5_server_ts ASC, created_at_utc ASC
-        LIMIT 2
         FORMAT TabSeparated
         """))
         return try body
@@ -148,7 +161,38 @@ public struct BrokerOffsetAutoAuthority: Sendable {
         } else {
             start = ((raw - day + 1) / day) * day
         }
-        return MT5ServerSecond(rawValue: start)
+            return MT5ServerSecond(rawValue: start)
+    }
+
+    private static func nonOverlappingInterval(
+        containing serverTime: MT5ServerSecond,
+        dayStart: MT5ServerSecond,
+        dayEnd: MT5ServerSecond,
+        existing: [ExistingOffsetSegment],
+        brokerSourceId: BrokerSourceId,
+        terminalIdentity: BrokerServerIdentity
+    ) throws -> (validFrom: MT5ServerSecond, validTo: MT5ServerSecond) {
+        var validFrom = dayStart
+        var validTo = dayEnd
+
+        for segment in existing {
+            if segment.validTo.rawValue <= serverTime.rawValue {
+                validFrom = MT5ServerSecond(rawValue: max(validFrom.rawValue, segment.validTo.rawValue))
+            } else if segment.validFrom.rawValue > serverTime.rawValue {
+                validTo = MT5ServerSecond(rawValue: min(validTo.rawValue, segment.validFrom.rawValue))
+            }
+        }
+
+        guard validFrom.rawValue <= serverTime.rawValue,
+              validTo.rawValue > serverTime.rawValue,
+              validFrom.rawValue < validTo.rawValue else {
+            throw BrokerOffsetAutoAuthorityError.noNonOverlappingLiveInterval(
+                brokerSourceId,
+                terminalIdentity,
+                serverTime
+            )
+        }
+        return (validFrom, validTo)
     }
 
     private static func sqlLiteral(_ value: String) -> String {
@@ -168,6 +212,10 @@ private struct ExistingOffsetSegment: Sendable {
     let validFrom: MT5ServerSecond
     let validTo: MT5ServerSecond
     let offset: OffsetSeconds
+
+    func contains(_ second: MT5ServerSecond) -> Bool {
+        second.rawValue >= validFrom.rawValue && second.rawValue < validTo.rawValue
+    }
 
     static func parse(_ row: String) throws -> ExistingOffsetSegment {
         let fields = row.split(separator: "\t", omittingEmptySubsequences: false)

@@ -91,6 +91,11 @@ public struct BackfillAgent: Sendable {
             terminalIdentity: terminalIdentity,
             snapshot: liveSnapshot
         )
+        try await ensureHistoricalOffsetAuthorityIfKnown(
+            mappings: mappings,
+            terminalIdentity: terminalIdentity,
+            liveSnapshot: liveSnapshot
+        )
         let offsetMap = try await offsetStore.loadVerifiedOffsetMap(
             brokerSourceId: config.brokerTime.brokerSourceId,
             terminalIdentity: terminalIdentity
@@ -128,6 +133,58 @@ public struct BackfillAgent: Sendable {
                 logger.error("\(mapping.logicalSymbol.rawValue): \(error)")
                 if config.app.strictSymbolFailures { throw error }
             }
+        }
+    }
+
+    private func ensureHistoricalOffsetAuthorityIfKnown(
+        mappings: [SymbolMapping],
+        terminalIdentity: BrokerServerIdentity,
+        liveSnapshot: ServerTimeSnapshotDTO
+    ) async throws {
+        guard BrokerOffsetPolicy.hasAutomaticHistoricalPolicy(for: terminalIdentity) else {
+            logger.info("No code-owned historical UTC offset policy for \(terminalIdentity); requiring audited broker_time_offsets rows from ClickHouse")
+            return
+        }
+        var requiredFrom: MT5ServerSecond?
+        var requiredTo: MT5ServerSecond?
+        for mapping in mappings {
+            do {
+                let symbolInfo = try bridge.prepareSymbol(mapping.mt5Symbol)
+                guard symbolInfo.selected else { throw IngestError.symbolMissing(mapping.mt5Symbol.rawValue) }
+                guard symbolInfo.digits == mapping.digits.rawValue else {
+                    throw IngestError.digitsMismatch(symbol: mapping.mt5Symbol.rawValue, expected: mapping.digits.rawValue, actual: symbolInfo.digits)
+                }
+                try await ensureHistorySynchronized(mapping: mapping)
+                let oldestResponse = try bridge.oldestM1BarTime(mapping.mt5Symbol)
+                try validateSingleTimeResponse(oldestResponse, expectedMT5Symbol: mapping.mt5Symbol)
+                let latestClosedResponse = try bridge.latestClosedM1Bar(mapping.mt5Symbol)
+                try validateSingleTimeResponse(latestClosedResponse, expectedMT5Symbol: mapping.mt5Symbol)
+                let oldest = MT5ServerSecond(rawValue: oldestResponse.mt5ServerTime)
+                let latestExclusive = try addOneMinute(to: MT5ServerSecond(rawValue: latestClosedResponse.mt5ServerTime))
+                requiredFrom = MT5ServerSecond(rawValue: min(requiredFrom?.rawValue ?? oldest.rawValue, oldest.rawValue))
+                requiredTo = MT5ServerSecond(rawValue: max(requiredTo?.rawValue ?? latestExclusive.rawValue, latestExclusive.rawValue))
+            } catch {
+                logger.error("\(mapping.logicalSymbol.rawValue): historical UTC authority pre-scan failed: \(error)")
+                if config.app.strictSymbolFailures { throw error }
+            }
+        }
+        guard let requiredFrom, let requiredTo, requiredFrom.rawValue < requiredTo.rawValue else {
+            logger.warn("Automatic historical UTC offset policy could not determine an MT5 history range from the selected symbols")
+            return
+        }
+        let inserted = try await BrokerOffsetHistoricalPolicyAuthority(
+            clickHouse: clickHouse,
+            database: config.clickHouse.database,
+            logger: logger
+        ).ensureHistoricalCoverageIfKnown(
+            brokerSourceId: config.brokerTime.brokerSourceId,
+            terminalIdentity: terminalIdentity,
+            requiredFrom: requiredFrom,
+            requiredToExclusive: requiredTo,
+            liveSnapshot: liveSnapshot
+        )
+        if inserted == 0 {
+            logger.ok("Automatic historical broker UTC authority already covers \(requiredFrom.rawValue)..<\(requiredTo.rawValue) for \(terminalIdentity)")
         }
     }
 

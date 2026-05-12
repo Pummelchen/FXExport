@@ -60,10 +60,12 @@ public struct BrokerSourceRegistry: Sendable {
     }
 
     public static func deriveBrokerSourceId(from identity: BrokerServerIdentity) throws -> BrokerSourceId {
+        let companyTokens = slugTokens(from: identity.company)
         let serverTokens = slugTokens(from: identity.server)
         // The canonical OHLC key uses broker_source_id, so the derived id must
-        // not collide when the same MT5 server is used by more than one account.
-        return try BrokerSourceId((serverTokens + ["account", String(identity.accountLogin)]).joined(separator: "-"))
+        // not collide when the same MT5 server/account label appears under a
+        // different broker company.
+        return try BrokerSourceId((companyTokens + serverTokens + ["account", String(identity.accountLogin)]).joined(separator: "-"))
     }
 
     private func activeBrokerSources(for identity: BrokerServerIdentity) async throws -> [BrokerSourceId] {

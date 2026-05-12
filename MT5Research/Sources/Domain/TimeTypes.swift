@@ -89,6 +89,7 @@ public enum OffsetSource: String, Codable, Hashable, Sendable {
     case configured
     case inferred
     case manual
+    case brokerPolicy = "broker_policy"
     case mt5LiveSnapshot = "mt5_live_snapshot"
     case unknown
 }

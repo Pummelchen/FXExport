@@ -83,6 +83,21 @@ final class HistoryDataAPITests: XCTestCase {
         }
     }
 
+    func testClickHouseProviderRejectsMissingDataCertificate() async throws {
+        let client = MockHistoryClickHouse(
+            body: try historyRow(utc: 1_577_836_800, mt5: 1_577_844_000, open: 108_342, high: 108_360, low: 108_300, close: 108_350),
+            certificateBody: ""
+        )
+        let provider = ClickHouseHistoricalOhlcDataProvider(client: client, database: "fx")
+
+        await XCTAssertThrowsErrorAsync(try await provider.loadM1Ohlc(try self.request())) { error in
+            guard case HistoryDataError.missingDataCertificate = error else {
+                XCTFail("Expected missingDataCertificate, got \(error)")
+                return
+            }
+        }
+    }
+
 
     func testClickHouseProviderRejectsDuplicateUtcRows() async throws {
         let row = try historyRow(utc: 1_577_836_800, mt5: 1_577_844_000, open: 108_342, high: 108_360, low: 108_300, close: 108_350)
@@ -211,17 +226,26 @@ private func historyRow(
 private actor MockHistoryClickHouse: ClickHouseClientProtocol {
     private let body: String
     private let coverageBody: String
+    private let certificateBody: String
     private var sql: String = ""
 
-    init(body: String, coverageBody: String = "1577836800\t1577836920\n") {
+    init(
+        body: String,
+        coverageBody: String = "1577836800\t1577836920\n",
+        certificateBody: String = "1577836800\t1577836920\n"
+    ) {
         self.body = body
         self.coverageBody = coverageBody
+        self.certificateBody = certificateBody
     }
 
     func execute(_ query: ClickHouseQuery) async throws -> String {
         sql = query.sql
         if query.sql.contains("ohlc_m1_verified_coverage") {
             return coverageBody
+        }
+        if query.sql.contains("data_certificates") {
+            return certificateBody
         }
         return body
     }

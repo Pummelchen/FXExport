@@ -687,6 +687,24 @@ final class OperationsTests: XCTestCase {
         }
     }
 
+    func testBacktestReadinessGateBlocksMissingDataCertificate() async throws {
+        let config = try makeConfig()
+        let clickHouse = BacktestGateClickHouse(mode: .missingDataCertificate)
+        let gate = BacktestReadinessGate(config: config, clickHouse: clickHouse)
+
+        await XCTAssertThrowsErrorAsync(try await gate.assertReady(BacktestReadinessRequest(
+            brokerSourceId: config.brokerTime.brokerSourceId,
+            logicalSymbol: try LogicalSymbol("EURUSD"),
+            utcStart: UtcSecond(rawValue: 60),
+            utcEndExclusive: UtcSecond(rawValue: 120)
+        ))) { error in
+            guard case BacktestReadinessError.missingDataCertificate = error else {
+                XCTFail("Expected missingDataCertificate, got \(error)")
+                return
+            }
+        }
+    }
+
     func testCheckpointGapAuditWarnsOnMissingConfiguredCheckpoints() async throws {
         let config = try makeConfig()
         let clickHouse = CheckpointAuditClickHouse(mode: .missingUSDJPYCheckpoint)
@@ -812,6 +830,26 @@ final class OperationsTests: XCTestCase {
         XCTAssertEqual(queries.count, 2)
         XCTAssertTrue(queries[1].sql.contains("INSERT INTO db.data_certificates"))
     }
+
+    func testDataCertificateUsesMinimalCoveringRowsWhenCoverageLedgerOverlaps() async throws {
+        let clickHouse = DataCertificateClickHouse(rows: [
+            coverageRow(utcStart: 60, utcEnd: 120, sourceCount: 1, canonicalCount: 1),
+            coverageRow(utcStart: 60, utcEnd: 180, sourceCount: 2, canonicalCount: 2)
+        ])
+        let store = DataCertificateStore(clickHouse: clickHouse, database: "db")
+
+        let certificate = try await store.certify(
+            brokerSourceId: try BrokerSourceId("demo"),
+            logicalSymbol: try LogicalSymbol("EURUSD"),
+            utcStart: UtcSecond(rawValue: 60),
+            utcEndExclusive: UtcSecond(rawValue: 180),
+            createdAtUtc: UtcSecond(rawValue: 1_000)
+        )
+
+        XCTAssertEqual(certificate.coverageRowCount, 1)
+        XCTAssertEqual(certificate.coverageSourceBarCount, 2)
+        XCTAssertEqual(certificate.coverageCanonicalRowCount, 2)
+    }
 }
 
 private struct StubAgent: ProductionAgent {
@@ -846,6 +884,7 @@ private enum BacktestGateMode {
     case missingRequiredAgentState
     case unfinishedIngestOperation
     case missingVerifiedCoverage
+    case missingDataCertificate
 }
 
 private enum CheckpointAuditMode {
@@ -893,6 +932,9 @@ private actor BacktestGateClickHouse: ClickHouseClientProtocol {
         }
         if sql.contains("FROM db.ohlc_m1_verified_coverage") {
             return mode == .missingVerifiedCoverage ? "" : "60\t120\n"
+        }
+        if sql.contains("FROM db.data_certificates") {
+            return mode == .missingDataCertificate ? "" : "60\t120\n"
         }
         if sql.contains("ohlc_m1_canonical") && sql.contains("ts_utc >= 60") && sql.contains("ts_utc < 120") {
             return "10\n"

@@ -42,6 +42,7 @@ public enum BacktestReadinessError: Error, CustomStringConvertible, Sendable {
     case requestedRangeBeyondCheckpoint(symbol: LogicalSymbol, requestedEnd: UtcSecond, checkpoint: UtcSecond)
     case noCanonicalBars(LogicalSymbol, UtcSecond, UtcSecond)
     case missingVerifiedCoverage(symbol: LogicalSymbol, from: UtcSecond, to: UtcSecond)
+    case missingDataCertificate(symbol: LogicalSymbol, from: UtcSecond, to: UtcSecond)
     case unfinishedIngestOperations(Int64)
     case duplicateCanonicalKeys(Int64)
     case ohlcInvariantFailures(Int64)
@@ -73,6 +74,8 @@ public enum BacktestReadinessError: Error, CustomStringConvertible, Sendable {
             return "\(symbol.rawValue) has no canonical bars in requested UTC range \(from.rawValue)..<\(to.rawValue)."
         case .missingVerifiedCoverage(let symbol, let from, let to):
             return "Backtest blocked: \(symbol.rawValue) UTC range \(from.rawValue)..<\(to.rawValue) is not fully covered by verified MT5 source coverage records."
+        case .missingDataCertificate(let symbol, let from, let to):
+            return "Backtest blocked: \(symbol.rawValue) UTC range \(from.rawValue)..<\(to.rawValue) is not fully covered by valid cryptographic data certificates."
         case .unfinishedIngestOperations(let count):
             return "Backtest blocked: \(count) ingest operation batch(es) are unfinished or failed. Resume the importer/live updater or verifier repair so each batch reaches a terminal verified status."
         case .duplicateCanonicalKeys(let count):
@@ -111,6 +114,7 @@ public struct BacktestReadinessGate: Sendable {
         try await validateIngestIsComplete(request)
         try await validateNoUnfinishedIngestOperations(request)
         try await validateVerifiedCoverage(request)
+        try await validateDataCertificates(request)
         try await validateCanonicalDatabase(request)
         try await validateRequestedRangeHasData(request)
         try await validateVerificationAndRepairState(request)
@@ -255,6 +259,46 @@ public struct BacktestReadinessGate: Sendable {
         FORMAT TabSeparated
         """)
         guard nonVerifiedOffsets == 0 else { throw BacktestReadinessError.nonVerifiedCanonicalOffsets(nonVerifiedOffsets) }
+    }
+
+    private func validateDataCertificates(_ request: BacktestReadinessRequest) async throws {
+        let body = try await clickHouse.execute(.select("""
+        SELECT utc_range_start, utc_range_end_exclusive
+        FROM \(config.clickHouse.database).data_certificates
+        WHERE broker_source_id = '\(SQLText.literal(request.brokerSourceId.rawValue))'
+          AND logical_symbol = '\(SQLText.literal(request.logicalSymbol.rawValue))'
+          AND timeframe = 'M1'
+          AND certificate_status = 'valid'
+          AND hash_schema_version = '\(SQLText.literal(ChunkHashSchemaVersion.sha256V1))'
+          AND length(certificate_sha256) = 64
+          AND length(mt5_source_sha256_aggregate) = 64
+          AND length(canonical_readback_sha256_aggregate) = 64
+          AND length(offset_authority_sha256_aggregate) = 64
+          AND utc_range_end_exclusive > \(request.utcStart.rawValue)
+          AND utc_range_start < \(request.utcEndExclusive.rawValue)
+        ORDER BY utc_range_start ASC, utc_range_end_exclusive ASC
+        FORMAT TabSeparated
+        """))
+        let intervals = try parseCoverageIntervals(body)
+        var cursor = request.utcStart.rawValue
+        for interval in intervals where interval.end > cursor {
+            guard interval.start <= cursor else {
+                throw BacktestReadinessError.missingDataCertificate(
+                    symbol: request.logicalSymbol,
+                    from: UtcSecond(rawValue: cursor),
+                    to: UtcSecond(rawValue: min(interval.start, request.utcEndExclusive.rawValue))
+                )
+            }
+            cursor = max(cursor, interval.end)
+            if cursor >= request.utcEndExclusive.rawValue {
+                return
+            }
+        }
+        throw BacktestReadinessError.missingDataCertificate(
+            symbol: request.logicalSymbol,
+            from: UtcSecond(rawValue: cursor),
+            to: request.utcEndExclusive
+        )
     }
 
     private func validateRequestedRangeHasData(_ request: BacktestReadinessRequest) async throws {
