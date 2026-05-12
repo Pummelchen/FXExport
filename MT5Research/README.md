@@ -62,7 +62,7 @@ The executable is:
 
 ## First Run Quickstart
 
-1. Start the tool and let the startup preflight check ClickHouse. If `Config/clickhouse.json` points to local ClickHouse at `localhost` or `127.0.0.1` and the HTTP endpoint is down, the tool tries safe local start commands automatically:
+1. Know what the startup preflight does before you run commands. If `Config/clickhouse.json` points to local ClickHouse at `localhost` or `127.0.0.1` and the HTTP endpoint is down, the tool tries safe local start commands automatically:
 
 ```bash
 brew services start clickhouse
@@ -337,6 +337,7 @@ The app does not execute commands passed at launch. Paste command text into the 
 > repair --symbol EURUSD --from 2020-01-01 --to 2020-02-01
 > data-check --config Config/history_data.json
 > fxbacktest-api --api-host 127.0.0.1 --api-port 5066
+> health-api --api-host 127.0.0.1 --api-port 5067
 ```
 
 Command options:
@@ -345,8 +346,8 @@ Command options:
 --config-dir Config
 --migrations-dir Migrations
 --config Config/history_data.json   # data-check only
---api-host 127.0.0.1                # fxbacktest-api only
---api-port 5066                     # fxbacktest-api only
+--api-host 127.0.0.1                # fxbacktest-api / health-api
+--api-port 5066                     # fxbacktest-api / health-api
 --verbose
 --debug
 ```
