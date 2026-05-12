@@ -234,10 +234,11 @@ public struct StartCheckRunner: Sendable {
         let positional = try bridge.ratesFromPosition(mt5Symbol: first.mt5Symbol, startPosition: 1, count: 1)
         guard positional.mt5Symbol == first.mt5Symbol.rawValue,
               positional.timeframe == Timeframe.m1.rawValue,
-              positional.rates.count == 1 else {
+              positional.rates.count == 1,
+              let positionalRate = positional.rates.first else {
             throw StartCheckError.invalidBridge("GET_RATES_FROM_POSITION did not return exactly one closed M1 bar")
         }
-        guard positional.rates[0].mt5ServerTime == latest.mt5ServerTime else {
+        guard positionalRate.mt5ServerTime == latest.mt5ServerTime else {
             throw StartCheckError.invalidBridge("GET_RATES_FROM_POSITION start_pos=1 did not match latest closed M1 bar")
         }
     }

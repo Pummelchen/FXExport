@@ -106,10 +106,7 @@ public struct HistoricalRangeVerifier: Sendable {
         var output: [ValidatedBar] = []
         let validator = OhlcValidator(timeConverter: TimeConverter(offsetMap: offsetMap))
         while cursor.rawValue < range.mt5EndExclusive.rawValue {
-            let chunkEnd = MT5ServerSecond(rawValue: min(
-                range.mt5EndExclusive.rawValue,
-                cursor.rawValue + Int64(config.app.chunkSize) * Timeframe.m1.seconds
-            ))
+            let chunkEnd = try chunkEndExclusive(cursor: cursor, rangeEndExclusive: range.mt5EndExclusive)
             let chunkLabel = OperatorStatusText.monthRangeLabel(start: cursor, endExclusive: chunkEnd)
             logger.verify("\(range.logicalSymbol.rawValue) - pulling MT5 verification M1 OHLC for \(chunkLabel)")
             let batchId = BatchId.deterministic(
@@ -147,6 +144,18 @@ public struct HistoricalRangeVerifier: Sendable {
             cursor = chunkEnd
         }
         return output
+    }
+
+    private func chunkEndExclusive(cursor: MT5ServerSecond, rangeEndExclusive: MT5ServerSecond) throws -> MT5ServerSecond {
+        let duration = Int64(config.app.chunkSize).multipliedReportingOverflow(by: Timeframe.m1.seconds)
+        guard !duration.overflow else {
+            throw HistoricalRangeVerifierError.invalidMT5Response("chunk size overflows M1 duration")
+        }
+        let candidate = cursor.rawValue.addingReportingOverflow(duration.partialValue)
+        guard !candidate.overflow else {
+            return rangeEndExclusive
+        }
+        return MT5ServerSecond(rawValue: min(rangeEndExclusive.rawValue, candidate.partialValue))
     }
 
     private func validateClosedBarsInRange(_ bars: [ClosedM1Bar], from: MT5ServerSecond, toExclusive: MT5ServerSecond) throws {

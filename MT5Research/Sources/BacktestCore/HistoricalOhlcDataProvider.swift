@@ -7,6 +7,7 @@ public struct HistoricalOhlcRequest: Sendable, Equatable {
     public let logicalSymbol: LogicalSymbol
     public let utcStartInclusive: UtcSecond
     public let utcEndExclusive: UtcSecond
+    public let expectedMT5Symbol: MT5Symbol?
     public let expectedDigits: Digits?
     public let maximumRows: Int?
     public let allowEmpty: Bool
@@ -16,6 +17,7 @@ public struct HistoricalOhlcRequest: Sendable, Equatable {
         logicalSymbol: LogicalSymbol,
         utcStartInclusive: UtcSecond,
         utcEndExclusive: UtcSecond,
+        expectedMT5Symbol: MT5Symbol? = nil,
         expectedDigits: Digits? = nil,
         maximumRows: Int? = nil,
         allowEmpty: Bool = false
@@ -33,6 +35,7 @@ public struct HistoricalOhlcRequest: Sendable, Equatable {
         self.logicalSymbol = logicalSymbol
         self.utcStartInclusive = utcStartInclusive
         self.utcEndExclusive = utcEndExclusive
+        self.expectedMT5Symbol = expectedMT5Symbol
         self.expectedDigits = expectedDigits
         self.maximumRows = maximumRows
         self.allowEmpty = allowEmpty
@@ -67,7 +70,7 @@ public struct ClickHouseHistoricalOhlcDataProvider: HistoricalOhlcDataProviding 
             throw HistoryDataError.invalidRequest("maximumRows is too large.")
         }
         let body = try await client.execute(.select(try sql(for: request, limit: limit + 1)))
-        let rows = try parseRows(body)
+        let rows = try parseRows(body, request: request)
         guard rows.count <= limit else {
             throw HistoryDataError.rowLimitExceeded(limit: limit)
         }
@@ -115,7 +118,7 @@ public struct ClickHouseHistoricalOhlcDataProvider: HistoricalOhlcDataProviding 
     private func sql(for request: HistoricalOhlcRequest, limit: Int) throws -> String {
         let database = try Self.sqlIdentifier(database)
         return """
-        SELECT ts_utc, mt5_server_ts_raw, open_scaled, high_scaled, low_scaled, close_scaled,
+        SELECT mt5_symbol, ts_utc, mt5_server_ts_raw, open_scaled, high_scaled, low_scaled, close_scaled,
                digits, timeframe, offset_confidence, source_status, bar_hash
         FROM \(database).ohlc_m1_canonical
         WHERE broker_source_id = '\(Self.sqlLiteral(request.brokerSourceId.rawValue))'
@@ -128,36 +131,36 @@ public struct ClickHouseHistoricalOhlcDataProvider: HistoricalOhlcDataProviding 
         """
     }
 
-    private func parseRows(_ body: String) throws -> [CanonicalOhlcRow] {
+    private func parseRows(_ body: String, request: HistoricalOhlcRequest) throws -> [CanonicalOhlcRow] {
         try body
             .split(separator: "\n", omittingEmptySubsequences: true)
-            .map { try parseRow(String($0)) }
+            .map { try parseRow(String($0), request: request) }
     }
 
-    private func parseRow(_ row: String) throws -> CanonicalOhlcRow {
+    private func parseRow(_ row: String, request: HistoricalOhlcRequest) throws -> CanonicalOhlcRow {
         let fields = row.split(separator: "\t", omittingEmptySubsequences: false).map { Self.unescapeTabSeparated(String($0)) }
-        guard fields.count == 11,
-              let tsUtc = Int64(fields[0]),
-              let mt5ServerTime = Int64(fields[1]),
-              let open = Int64(fields[2]),
-              let high = Int64(fields[3]),
-              let low = Int64(fields[4]),
-              let close = Int64(fields[5]),
-              let digitsRaw = Int(fields[6]) else {
+        guard fields.count == 12,
+              let mt5Symbol = MT5Symbol(rawValue: fields[0]),
+              let tsUtc = Int64(fields[1]),
+              let mt5ServerTime = Int64(fields[2]),
+              let open = Int64(fields[3]),
+              let high = Int64(fields[4]),
+              let low = Int64(fields[5]),
+              let close = Int64(fields[6]),
+              let digitsRaw = Int(fields[7]) else {
             throw HistoryDataError.invalidCanonicalRow(row)
         }
-        guard let timeframe = Timeframe(rawValue: fields[7]) else {
-            throw HistoryDataError.invalidCanonicalRow("unknown timeframe '\(fields[7])'")
+        guard let timeframe = Timeframe(rawValue: fields[8]) else {
+            throw HistoryDataError.invalidCanonicalRow("unknown timeframe '\(fields[8])'")
         }
-        guard let confidence = OffsetConfidence(rawValue: fields[8]) else {
-            throw HistoryDataError.invalidCanonicalRow("unknown offset confidence '\(fields[8])'")
+        guard let confidence = OffsetConfidence(rawValue: fields[9]) else {
+            throw HistoryDataError.invalidCanonicalRow("unknown offset confidence '\(fields[9])'")
         }
-        guard let sourceStatus = SourceStatus(rawValue: fields[9]) else {
-            throw HistoryDataError.invalidCanonicalRow("unknown source status '\(fields[9])'")
+        guard let sourceStatus = SourceStatus(rawValue: fields[10]) else {
+            throw HistoryDataError.invalidCanonicalRow("unknown source status '\(fields[10])'")
         }
-        let barHash = fields[10]
-        guard !barHash.isEmpty else {
-            throw HistoryDataError.invalidCanonicalRow("empty bar hash")
+        guard let storedHashValue = UInt64(fields[11], radix: 16) else {
+            throw HistoryDataError.invalidCanonicalRow("invalid bar hash '\(fields[11])'")
         }
         guard timeframe == .m1 else {
             throw HistoryDataError.invalidCanonicalRow("canonical data API only accepts M1 rows")
@@ -176,6 +179,26 @@ public struct ClickHouseHistoricalOhlcDataProvider: HistoricalOhlcDataProviding 
         guard sourceStatus == .mt5ClosedBar else {
             throw HistoryDataError.invalidCanonicalRow("canonical row source_status is \(sourceStatus.rawValue), expected \(SourceStatus.mt5ClosedBar.rawValue)")
         }
+        if let expectedMT5Symbol = request.expectedMT5Symbol, mt5Symbol != expectedMT5Symbol {
+            throw HistoryDataError.invalidCanonicalRow("MT5 symbol mismatch: expected \(expectedMT5Symbol.rawValue), got \(mt5Symbol.rawValue)")
+        }
+        let digits = try Digits(digitsRaw)
+        let computedHash = BarHash.compute(
+            brokerSourceId: request.brokerSourceId,
+            logicalSymbol: request.logicalSymbol,
+            mt5Symbol: mt5Symbol,
+            timeframe: timeframe,
+            utcTime: utcTime,
+            mt5ServerTime: serverTime,
+            open: PriceScaled(rawValue: open, digits: digits),
+            high: PriceScaled(rawValue: high, digits: digits),
+            low: PriceScaled(rawValue: low, digits: digits),
+            close: PriceScaled(rawValue: close, digits: digits),
+            digits: digits
+        )
+        guard storedHashValue == computedHash.rawValue else {
+            throw HistoryDataError.invalidCanonicalRow("bar hash mismatch at UTC \(tsUtc)")
+        }
         return CanonicalOhlcRow(
             utcTime: utcTime,
             mt5ServerTime: serverTime,
@@ -183,7 +206,7 @@ public struct ClickHouseHistoricalOhlcDataProvider: HistoricalOhlcDataProviding 
             high: high,
             low: low,
             close: close,
-            digits: try Digits(digitsRaw)
+            digits: digits
         )
     }
 
@@ -208,9 +231,10 @@ public struct ClickHouseHistoricalOhlcDataProvider: HistoricalOhlcDataProviding 
     }
 
     private static func sqlIdentifier(_ value: String) throws -> String {
-        guard !value.isEmpty,
+        guard let first = value.first,
+              first == "_" || first.isLetter,
               value.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" }) else {
-            throw HistoryDataError.invalidRequest("ClickHouse database name must contain only letters, numbers, or underscore.")
+            throw HistoryDataError.invalidRequest("ClickHouse database name must contain only letters, numbers, or underscore, and must not start with a digit.")
         }
         return value
     }

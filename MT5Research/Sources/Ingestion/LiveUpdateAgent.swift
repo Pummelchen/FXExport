@@ -121,8 +121,8 @@ public struct LiveUpdateAgent: Sendable {
             return
         }
 
-        let from = MT5ServerSecond(rawValue: state.latestIngestedClosedMT5ServerTime.rawValue + Timeframe.m1.seconds)
-        let toExclusive = MT5ServerSecond(rawValue: latestClosed.rawValue + Timeframe.m1.seconds)
+        let from = try addOneMinute(to: state.latestIngestedClosedMT5ServerTime)
+        let toExclusive = try addOneMinute(to: latestClosed)
         let rangeLabel = OperatorStatusText.monthRangeLabel(start: from, endExclusive: toExclusive)
         let batchId = BatchId.deterministic(
             brokerSourceId: config.brokerTime.brokerSourceId,
@@ -181,7 +181,7 @@ public struct LiveUpdateAgent: Sendable {
         ))
         let verifiedRangeLabel = OperatorStatusText.monthRangeLabel(
             start: first.utcTime,
-            endExclusive: UtcSecond(rawValue: last.utcTime.rawValue + Timeframe.m1.seconds)
+            endExclusive: try addOneMinute(to: last.utcTime)
         )
         logger.ok("\(mapping.logicalSymbol.rawValue) - \(verifiedRangeLabel) pulled, verified, UTC correct and canonical data clean (\(validated.count) new closed M1 bars)")
     }
@@ -207,5 +207,21 @@ public struct LiveUpdateAgent: Sendable {
         } catch let error as TerminalIdentityPolicyError {
             throw IngestError.terminalIdentityMismatch(error.description)
         }
+    }
+
+    private func addOneMinute(to value: MT5ServerSecond) throws -> MT5ServerSecond {
+        let result = value.rawValue.addingReportingOverflow(Timeframe.m1.seconds)
+        guard !result.overflow else {
+            throw IngestError.invalidChunk("MT5 server timestamp overflow while advancing one M1 bar")
+        }
+        return MT5ServerSecond(rawValue: result.partialValue)
+    }
+
+    private func addOneMinute(to value: UtcSecond) throws -> UtcSecond {
+        let result = value.rawValue.addingReportingOverflow(Timeframe.m1.seconds)
+        guard !result.overflow else {
+            throw IngestError.invalidChunk("UTC timestamp overflow while advancing one M1 bar")
+        }
+        return UtcSecond(rawValue: result.partialValue)
     }
 }

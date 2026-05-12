@@ -121,12 +121,15 @@ public struct ValidatedBar: Codable, Hashable, Sendable {
         self.barHash = BarHash.compute(
             brokerSourceId: brokerSourceId,
             logicalSymbol: logicalSymbol,
+            mt5Symbol: mt5Symbol,
+            timeframe: timeframe,
             utcTime: utcTime,
             mt5ServerTime: mt5ServerTime,
             open: open,
             high: high,
             low: low,
-            close: close
+            close: close,
+            digits: digits
         )
     }
 }

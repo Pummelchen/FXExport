@@ -29,10 +29,10 @@ final class HistoryDataAPITests: XCTestCase {
     }
 
     func testClickHouseProviderBuildsValidatedColumnarSeries() async throws {
-        let client = MockHistoryClickHouse(body: """
-        1577836800\t1577844000\t108342\t108360\t108300\t108350\t5\tM1\tverified\tmt5ClosedBar\tabc
-        1577836860\t1577844060\t108350\t108370\t108320\t108355\t5\tM1\tverified\tmt5ClosedBar\tdef
-        """)
+        let client = MockHistoryClickHouse(body: try [
+            historyRow(utc: 1_577_836_800, mt5: 1_577_844_000, open: 108_342, high: 108_360, low: 108_300, close: 108_350),
+            historyRow(utc: 1_577_836_860, mt5: 1_577_844_060, open: 108_350, high: 108_370, low: 108_320, close: 108_355)
+        ].joined(separator: "\n"))
         let provider = ClickHouseHistoricalOhlcDataProvider(client: client, database: "fx")
         let request = try request()
 
@@ -52,9 +52,15 @@ final class HistoryDataAPITests: XCTestCase {
     }
 
     func testClickHouseProviderRejectsNonVerifiedCanonicalRows() async throws {
-        let client = MockHistoryClickHouse(body: """
-        1577836800\t1577844000\t108342\t108360\t108300\t108350\t5\tM1\tinferred\tmt5ClosedBar\tabc
-        """)
+        let client = MockHistoryClickHouse(body: try historyRow(
+            utc: 1_577_836_800,
+            mt5: 1_577_844_000,
+            open: 108_342,
+            high: 108_360,
+            low: 108_300,
+            close: 108_350,
+            confidence: "inferred"
+        ))
         let provider = ClickHouseHistoricalOhlcDataProvider(client: client, database: "fx")
 
         await XCTAssertThrowsErrorAsync(try await provider.loadM1Ohlc(try self.request())) { error in
@@ -63,10 +69,8 @@ final class HistoryDataAPITests: XCTestCase {
     }
 
     func testClickHouseProviderRejectsDuplicateUtcRows() async throws {
-        let client = MockHistoryClickHouse(body: """
-        1577836800\t1577844000\t108342\t108360\t108300\t108350\t5\tM1\tverified\tmt5ClosedBar\tabc
-        1577836800\t1577844000\t108342\t108360\t108300\t108350\t5\tM1\tverified\tmt5ClosedBar\tdef
-        """)
+        let row = try historyRow(utc: 1_577_836_800, mt5: 1_577_844_000, open: 108_342, high: 108_360, low: 108_300, close: 108_350)
+        let client = MockHistoryClickHouse(body: [row, row].joined(separator: "\n"))
         let provider = ClickHouseHistoricalOhlcDataProvider(client: client, database: "fx")
 
         await XCTAssertThrowsErrorAsync(try await provider.loadM1Ohlc(try self.request())) { error in
@@ -74,11 +78,41 @@ final class HistoryDataAPITests: XCTestCase {
         }
     }
 
+    func testClickHouseProviderRejectsStoredHashMismatch() async throws {
+        let validRow = try historyRow(utc: 1_577_836_800, mt5: 1_577_844_000, open: 108_342, high: 108_360, low: 108_300, close: 108_350)
+        let fields = validRow.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+        let corruptRow = (Array(fields.dropLast()) + ["0000000000000000"]).joined(separator: "\t")
+        let client = MockHistoryClickHouse(body: corruptRow)
+        let provider = ClickHouseHistoricalOhlcDataProvider(client: client, database: "fx")
+
+        await XCTAssertThrowsErrorAsync(try await provider.loadM1Ohlc(try self.request())) { error in
+            XCTAssertTrue(String(describing: error).contains("bar hash mismatch"))
+        }
+    }
+
+    func testClickHouseProviderRejectsUnexpectedMT5SymbolWhenExpected() async throws {
+        let client = MockHistoryClickHouse(body: try historyRow(
+            utc: 1_577_836_800,
+            mt5: 1_577_844_000,
+            open: 108_342,
+            high: 108_360,
+            low: 108_300,
+            close: 108_350,
+            mt5SymbolText: "EURUSD.a"
+        ))
+        let provider = ClickHouseHistoricalOhlcDataProvider(client: client, database: "fx")
+        let expectedMT5Symbol = try MT5Symbol("EURUSD")
+
+        await XCTAssertThrowsErrorAsync(try await provider.loadM1Ohlc(try self.request(expectedMT5Symbol: expectedMT5Symbol))) { error in
+            XCTAssertTrue(String(describing: error).contains("MT5 symbol mismatch"))
+        }
+    }
+
     func testClickHouseProviderEnforcesRowLimit() async throws {
-        let client = MockHistoryClickHouse(body: """
-        1577836800\t1577844000\t108342\t108360\t108300\t108350\t5\tM1\tverified\tmt5ClosedBar\tabc
-        1577836860\t1577844060\t108350\t108370\t108320\t108355\t5\tM1\tverified\tmt5ClosedBar\tdef
-        """)
+        let client = MockHistoryClickHouse(body: try [
+            historyRow(utc: 1_577_836_800, mt5: 1_577_844_000, open: 108_342, high: 108_360, low: 108_300, close: 108_350),
+            historyRow(utc: 1_577_836_860, mt5: 1_577_844_060, open: 108_350, high: 108_370, low: 108_320, close: 108_355)
+        ].joined(separator: "\n"))
         let provider = ClickHouseHistoricalOhlcDataProvider(client: client, database: "fx")
         let limitedRequest = try HistoricalOhlcRequest(
             brokerSourceId: try BrokerSourceId("demo"),
@@ -102,15 +136,60 @@ final class HistoryDataAPITests: XCTestCase {
         )
     }
 
-    private func request() throws -> HistoricalOhlcRequest {
+    private func request(expectedMT5Symbol: MT5Symbol? = nil) throws -> HistoricalOhlcRequest {
         try HistoricalOhlcRequest(
             brokerSourceId: try BrokerSourceId("demo"),
             logicalSymbol: try LogicalSymbol("EURUSD"),
             utcStartInclusive: UtcSecond(rawValue: 1_577_836_800),
             utcEndExclusive: UtcSecond(rawValue: 1_577_836_920),
+            expectedMT5Symbol: expectedMT5Symbol,
             expectedDigits: try Digits(5)
         )
     }
+}
+
+private func historyRow(
+    utc: Int64,
+    mt5: Int64,
+    open: Int64,
+    high: Int64,
+    low: Int64,
+    close: Int64,
+    confidence: String = "verified",
+    sourceStatus: String = "mt5ClosedBar",
+    mt5SymbolText: String = "EURUSD"
+) throws -> String {
+    let broker = try BrokerSourceId("demo")
+    let logicalSymbol = try LogicalSymbol("EURUSD")
+    let mt5Symbol = try MT5Symbol(mt5SymbolText)
+    let digits = try Digits(5)
+    let hash = BarHash.compute(
+        brokerSourceId: broker,
+        logicalSymbol: logicalSymbol,
+        mt5Symbol: mt5Symbol,
+        timeframe: .m1,
+        utcTime: UtcSecond(rawValue: utc),
+        mt5ServerTime: MT5ServerSecond(rawValue: mt5),
+        open: PriceScaled(rawValue: open, digits: digits),
+        high: PriceScaled(rawValue: high, digits: digits),
+        low: PriceScaled(rawValue: low, digits: digits),
+        close: PriceScaled(rawValue: close, digits: digits),
+        digits: digits
+    )
+    return [
+        mt5Symbol.rawValue,
+        String(utc),
+        String(mt5),
+        String(open),
+        String(high),
+        String(low),
+        String(close),
+        String(digits.rawValue),
+        Timeframe.m1.rawValue,
+        confidence,
+        sourceStatus,
+        hash.description
+    ].joined(separator: "\t")
 }
 
 private actor MockHistoryClickHouse: ClickHouseClientProtocol {

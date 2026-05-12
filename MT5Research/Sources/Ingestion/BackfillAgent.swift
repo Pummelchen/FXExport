@@ -198,7 +198,7 @@ public struct BackfillAgent: Sendable {
             }
             let verifiedRangeLabel = OperatorStatusText.monthRangeLabel(
                 start: first.utcTime,
-                endExclusive: UtcSecond(rawValue: last.utcTime.rawValue + Timeframe.m1.seconds)
+                endExclusive: try addOneMinute(to: last.utcTime)
             )
             let state = IngestState(
                 brokerSourceId: config.brokerTime.brokerSourceId,
@@ -213,17 +213,17 @@ public struct BackfillAgent: Sendable {
             )
             try await checkpointStore.save(state)
             logger.ok("\(mapping.logicalSymbol.rawValue) - \(verifiedRangeLabel) pulled, verified, UTC correct and canonical data clean (\(validated.count) closed M1 bars)")
-            cursor = MT5ServerSecond(rawValue: last.mt5ServerTime.rawValue + Timeframe.m1.seconds)
+            cursor = try addOneMinute(to: last.mt5ServerTime)
         }
     }
 
     private func insertValidatedBars(_ bars: [ValidatedBar], insertBuilder: ClickHouseInsertBuilder) async throws {
-        guard !bars.isEmpty else { return }
+        guard let first = bars.first else { return }
         let rawInsert = insertBuilder.rawBarsInsert(bars)
         let canonicalDelete = try insertBuilder.canonicalRangeDelete(bars)
         let canonicalInsert = try insertBuilder.canonicalBarsInsert(bars)
         try await CanonicalConflictRecorder(clickHouse: clickHouse, insertBuilder: insertBuilder)
-            .recordConflictsBeforeCanonicalReplace(bars, detectedAtUtc: bars[0].ingestedAtUtc)
+            .recordConflictsBeforeCanonicalReplace(bars, detectedAtUtc: first.ingestedAtUtc)
         _ = try await clickHouse.execute(rawInsert)
         _ = try await clickHouse.execute(canonicalDelete)
         _ = try await clickHouse.execute(canonicalInsert)
@@ -301,5 +301,21 @@ public struct BackfillAgent: Sendable {
         } catch let error as TerminalIdentityPolicyError {
             throw IngestError.terminalIdentityMismatch(error.description)
         }
+    }
+
+    private func addOneMinute(to value: MT5ServerSecond) throws -> MT5ServerSecond {
+        let result = value.rawValue.addingReportingOverflow(Timeframe.m1.seconds)
+        guard !result.overflow else {
+            throw IngestError.invalidChunk("MT5 server timestamp overflow while advancing one M1 bar")
+        }
+        return MT5ServerSecond(rawValue: result.partialValue)
+    }
+
+    private func addOneMinute(to value: UtcSecond) throws -> UtcSecond {
+        let result = value.rawValue.addingReportingOverflow(Timeframe.m1.seconds)
+        guard !result.overflow else {
+            throw IngestError.invalidChunk("UTC timestamp overflow while advancing one M1 bar")
+        }
+        return UtcSecond(rawValue: result.partialValue)
     }
 }

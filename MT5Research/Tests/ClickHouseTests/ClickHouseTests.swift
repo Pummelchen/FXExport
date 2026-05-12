@@ -68,12 +68,15 @@ final class ClickHouseTests: XCTestCase {
         XCTAssertTrue(query.sql.contains("ts_utc <= 120"))
         XCTAssertTrue(query.sql.contains("uniqExact(mt5_server_ts_raw)"))
         XCTAssertTrue(query.sql.contains("uniqExact(ts_utc)"))
+        XCTAssertTrue(query.sql.contains("uniqExact(mt5_symbol)"))
+        XCTAssertTrue(query.sql.contains("countIf(offset_confidence != 'verified')"))
     }
 
     func testCanonicalRangeReadbackRowsAreBrokerScopedAndOrdered() throws {
         let bars = [try makeBar(mt5: 120, utc: 60), try makeBar(mt5: 180, utc: 120)]
         let query = try ClickHouseInsertBuilder(database: "db").canonicalRangeReadbackRows(bars)
-        XCTAssertTrue(query.sql.contains("SELECT mt5_server_ts_raw, ts_utc, bar_hash"))
+        XCTAssertTrue(query.sql.contains("SELECT mt5_symbol, timeframe, mt5_server_ts_raw, ts_utc, offset_confidence"))
+        XCTAssertTrue(query.sql.contains("open_scaled, high_scaled, low_scaled, close_scaled, digits, bar_hash"))
         XCTAssertTrue(query.sql.contains("broker_source_id = 'demo'"))
         XCTAssertTrue(query.sql.contains("logical_symbol = 'EURUSD'"))
         XCTAssertTrue(query.sql.contains("ts_utc >= 60"))

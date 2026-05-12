@@ -12,9 +12,9 @@ public struct CanonicalConflictRecorder: Sendable {
     }
 
     public func recordConflictsBeforeCanonicalReplace(_ bars: [ValidatedBar], detectedAtUtc: UtcSecond) async throws {
-        guard !bars.isEmpty else { return }
+        guard let first = bars.first else { return }
         let body = try await clickHouse.execute(try insertBuilder.canonicalConflictCandidates(bars))
-        let candidates = try Self.parseCandidates(body, digits: bars[0].digits)
+        let candidates = try Self.parseCandidates(body, digits: first.digits)
         guard !candidates.isEmpty else { return }
 
         var incomingByUtc: [UtcSecond: ValidatedBar] = [:]

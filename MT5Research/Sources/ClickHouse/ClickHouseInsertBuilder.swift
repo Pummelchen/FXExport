@@ -84,10 +84,17 @@ public struct ClickHouseInsertBuilder: Sendable {
     public func canonicalRangeIntegrityCheck(_ bars: [ValidatedBar]) throws -> ClickHouseQuery {
         let range = try canonicalRangeIdentity(bars)
         guard let first = range.first, let last = range.last else {
-            return .select("SELECT 0, 0, 0 FORMAT TabSeparated")
+            return .select("SELECT 0, 0, 0, 0, 0, 0, 0 FORMAT TabSeparated")
         }
         let sql = """
-        SELECT count(), uniqExact(mt5_server_ts_raw), uniqExact(ts_utc)
+        SELECT
+            count(),
+            uniqExact(mt5_server_ts_raw),
+            uniqExact(ts_utc),
+            uniqExact(mt5_symbol),
+            uniqExact(timeframe),
+            uniqExact(digits),
+            countIf(offset_confidence != 'verified')
         FROM \(database).ohlc_m1_canonical
         WHERE broker_source_id = '\(sqlLiteral(first.brokerSourceId.rawValue))'
           AND logical_symbol = '\(sqlLiteral(first.logicalSymbol.rawValue))'
@@ -101,10 +108,11 @@ public struct ClickHouseInsertBuilder: Sendable {
     public func canonicalRangeReadbackRows(_ bars: [ValidatedBar]) throws -> ClickHouseQuery {
         let range = try canonicalRangeIdentity(bars)
         guard let first = range.first, let last = range.last else {
-            return .select("SELECT mt5_server_ts_raw, ts_utc, bar_hash FROM \(database).ohlc_m1_canonical WHERE 0 FORMAT TabSeparated")
+            return .select("SELECT mt5_symbol, timeframe, mt5_server_ts_raw, ts_utc, offset_confidence, open_scaled, high_scaled, low_scaled, close_scaled, digits, bar_hash FROM \(database).ohlc_m1_canonical WHERE 0 FORMAT TabSeparated")
         }
         let sql = """
-        SELECT mt5_server_ts_raw, ts_utc, bar_hash
+        SELECT mt5_symbol, timeframe, mt5_server_ts_raw, ts_utc, offset_confidence,
+               open_scaled, high_scaled, low_scaled, close_scaled, digits, bar_hash
         FROM \(database).ohlc_m1_canonical
         WHERE broker_source_id = '\(sqlLiteral(first.brokerSourceId.rawValue))'
           AND logical_symbol = '\(sqlLiteral(first.logicalSymbol.rawValue))'

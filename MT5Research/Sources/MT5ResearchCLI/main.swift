@@ -424,6 +424,7 @@ struct MT5ResearchCLI {
             logicalSymbol: historyConfig.logicalSymbol,
             utcStartInclusive: historyConfig.fromUtc,
             utcEndExclusive: historyConfig.toUtc,
+            expectedMT5Symbol: mapping.mt5Symbol,
             expectedDigits: mapping.digits
         )
     }

@@ -104,6 +104,47 @@ final class VerificationTests: XCTestCase {
         XCTAssertEqual(result.mismatches, [.offsetConfidence(index: 0, database: .inferred)])
     }
 
+    func testVerificationComparatorRejectsCanonicalMetadataMismatch() throws {
+        let broker = try BrokerSourceId("demo")
+        let symbol = try LogicalSymbol("EURUSD")
+        let mt5Symbol = try MT5Symbol("EURUSD")
+        let databaseMT5Symbol = try MT5Symbol("EURUSD.a")
+        let mt5Digits = try Digits(5)
+        let databaseDigits = try Digits(3)
+        let mt5 = VerificationBar(
+            brokerSourceId: broker,
+            logicalSymbol: symbol,
+            mt5Symbol: mt5Symbol,
+            mt5ServerTime: MT5ServerSecond(rawValue: 7_260),
+            utcTime: UtcSecond(rawValue: 60),
+            open: PriceScaled(rawValue: 100_000, digits: mt5Digits),
+            high: PriceScaled(rawValue: 100_010, digits: mt5Digits),
+            low: PriceScaled(rawValue: 99_990, digits: mt5Digits),
+            close: PriceScaled(rawValue: 100_001, digits: mt5Digits),
+            digits: mt5Digits,
+            barHash: BarHash(rawValue: 1)
+        )
+        let database = VerificationBar(
+            brokerSourceId: broker,
+            logicalSymbol: symbol,
+            mt5Symbol: databaseMT5Symbol,
+            mt5ServerTime: mt5.mt5ServerTime,
+            utcTime: mt5.utcTime,
+            open: PriceScaled(rawValue: 100_000, digits: databaseDigits),
+            high: PriceScaled(rawValue: 100_010, digits: databaseDigits),
+            low: PriceScaled(rawValue: 99_990, digits: databaseDigits),
+            close: PriceScaled(rawValue: 100_001, digits: databaseDigits),
+            digits: databaseDigits,
+            barHash: mt5.barHash
+        )
+
+        let result = VerificationComparator().compare(mt5SourceBars: [mt5], databaseBars: [database])
+
+        XCTAssertFalse(result.isClean)
+        XCTAssertTrue(result.mismatches.contains(.mt5Symbol(index: 0, mt5: mt5Symbol, database: databaseMT5Symbol)))
+        XCTAssertTrue(result.mismatches.contains(.digits(index: 0, mt5: mt5Digits, database: databaseDigits)))
+    }
+
     func testRepairRangePlannerMapsUtcRangeThroughVerifiedOffsetSegments() throws {
         let broker = try BrokerSourceId("demo")
         let identity = try BrokerServerIdentity(company: "Broker", server: "Server", accountLogin: 1)
@@ -134,6 +175,20 @@ final class VerificationTests: XCTestCase {
         XCTAssertEqual(ranges.count, 1)
         XCTAssertEqual(ranges[0].mt5Start, MT5ServerSecond(rawValue: 7_200))
         XCTAssertEqual(ranges[0].mt5EndExclusive, MT5ServerSecond(rawValue: 10_800))
+    }
+
+    func testRandomRangeSelectorChoosesCalendarMonthWindow() throws {
+        var random = ZeroRandomNumberGenerator()
+        let range = try RandomRangeSelector().selectMonth(
+            brokerSourceId: try BrokerSourceId("demo"),
+            logicalSymbol: try LogicalSymbol("EURUSD"),
+            oldest: MT5ServerSecond(rawValue: 1_330_560_000),
+            latestClosed: MT5ServerSecond(rawValue: 1_333_238_340),
+            random: &random
+        )
+
+        XCTAssertEqual(range.mt5Start, MT5ServerSecond(rawValue: 1_330_560_000))
+        XCTAssertEqual(range.mt5EndExclusive, MT5ServerSecond(rawValue: 1_333_238_400))
     }
 
     func testRepairRangePlannerAcceptsRangeInsideExistingSegment() throws {
@@ -219,6 +274,10 @@ final class VerificationTests: XCTestCase {
             XCTAssertTrue(query.sql.contains("broker_source_id = 'demo'"), query.sql)
         }
     }
+}
+
+private struct ZeroRandomNumberGenerator: RandomNumberGenerator {
+    mutating func next() -> UInt64 { 0 }
 }
 
 private actor StartupVerificationClickHouse: ClickHouseClientProtocol {

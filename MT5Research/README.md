@@ -252,7 +252,7 @@ This creates:
 
 Raw audit data is append-only. Repairs only target canonical data and must preserve conflicts and repair logs.
 
-Canonical ingestion is replace-by-range for the affected broker/source/symbol range. Before replacing a canonical range, Swift reads existing canonical rows for the same UTC identities and writes `ohlc_m1_conflicts` rows for any differing OHLC/hash values. The delete predicate then covers both the raw MT5 server-time range and the converted UTC identity range before reinserting verified rows. After the replacement insert, Swift reads the canonical range back from ClickHouse and verifies row count, unique MT5 and UTC timestamp counts, and the exact MT5 timestamp/UTC/hash sequence before advancing the checkpoint. This prevents duplicate canonical bars after a crash between insert and checkpoint update, catches older rows written under a wrong UTC mapping, and preserves conflicting canonical versions for audit. Raw audit rows remain append-only.
+Canonical ingestion is replace-by-range for the affected broker/source/symbol range. Before replacing a canonical range, Swift reads existing canonical rows for the same UTC identities and writes `ohlc_m1_conflicts` rows for any differing OHLC/hash values. The delete predicate then covers both the raw MT5 server-time range and the converted UTC identity range before reinserting verified rows. After the replacement insert, Swift reads the canonical range back from ClickHouse and verifies row count, unique MT5 and UTC timestamp counts, single MT5 symbol/timeframe/digits identity, zero non-verified UTC offset rows, and the exact MT5 timestamp/UTC/OHLC/digits/hash sequence before advancing the checkpoint. This prevents duplicate canonical bars after a crash between insert and checkpoint update, catches older rows written under a wrong UTC mapping, and preserves conflicting canonical versions for audit. Raw audit rows remain append-only.
 
 ## Crash Or Abort Recovery
 
@@ -417,13 +417,14 @@ let request = try HistoricalOhlcRequest(
     logicalSymbol: try LogicalSymbol("EURUSD"),
     utcStartInclusive: UtcSecond(rawValue: 1_577_836_800),
     utcEndExclusive: UtcSecond(rawValue: 1_735_689_600),
+    expectedMT5Symbol: try MT5Symbol("EURUSD"),
     expectedDigits: try Digits(5),
     maximumRows: 5_000_000
 )
 let series = try await provider.loadM1Ohlc(request)
 ```
 
-The provider is read-only. It queries `ohlc_m1_canonical`, rejects non-M1 rows, non-verified UTC offsets, non-closed-bar source statuses, duplicate or unsorted UTC timestamps, mixed digits, invalid OHLC invariants, and over-large requests. It does not create local caches because verifier/repair agents may legitimately rewrite canonical ranges after MT5 source-of-truth checks. Let ClickHouse serve the current canonical state; add caches only after a coherent invalidation strategy exists.
+The provider is read-only. It queries `ohlc_m1_canonical`, rejects non-M1 rows, unexpected MT5 symbols when configured, non-verified UTC offsets, non-closed-bar source statuses, duplicate or unsorted UTC timestamps, mixed digits, stored bar-hash mismatches, invalid OHLC invariants, and over-large requests. It does not create local caches because verifier/repair agents may legitimately rewrite canonical ranges after MT5 source-of-truth checks. Let ClickHouse serve the current canonical state; add caches only after a coherent invalidation strategy exists.
 
 For Metal-capable external apps:
 

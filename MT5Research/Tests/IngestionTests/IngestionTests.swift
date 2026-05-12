@@ -121,8 +121,8 @@ final class IngestionTests: XCTestCase {
     func testCanonicalInsertVerifierComparesReadbackHashes() async throws {
         let bar = try validatedBar(mt5: 120, utc: 60)
         let client = SequenceClickHouseClient(bodies: [
-            "1\t1\t1\n",
-            "120\t60\t\(bar.barHash.description)\n"
+            "1\t1\t1\t1\t1\t1\t0\n",
+            "EURUSD\tM1\t120\t60\tverified\t110000\t110000\t110000\t110000\t5\t\(bar.barHash.description)\n"
         ])
 
         try await CanonicalInsertVerifier(
@@ -134,8 +134,21 @@ final class IngestionTests: XCTestCase {
     func testCanonicalInsertVerifierRejectsHashMismatch() async throws {
         let bar = try validatedBar(mt5: 120, utc: 60)
         let client = SequenceClickHouseClient(bodies: [
-            "1\t1\t1\n",
-            "120\t60\tbad-hash\n"
+            "1\t1\t1\t1\t1\t1\t0\n",
+            "EURUSD\tM1\t120\t60\tverified\t110000\t110000\t110000\t110000\t5\tbad-hash\n"
+        ])
+
+        await XCTAssertThrowsErrorAsync(try await CanonicalInsertVerifier(
+            clickHouse: client,
+            insertBuilder: ClickHouseInsertBuilder(database: "db")
+        ).verify([bar]))
+    }
+
+    func testCanonicalInsertVerifierRejectsMetadataMismatch() async throws {
+        let bar = try validatedBar(mt5: 120, utc: 60)
+        let client = SequenceClickHouseClient(bodies: [
+            "1\t1\t1\t1\t1\t1\t0\n",
+            "EURUSD.a\tM1\t120\t60\tverified\t110000\t110000\t110000\t110000\t5\t\(bar.barHash.description)\n"
         ])
 
         await XCTAssertThrowsErrorAsync(try await CanonicalInsertVerifier(

@@ -59,7 +59,12 @@ public struct PriceScaled: Codable, Hashable, Sendable, Comparable, CustomString
         guard let fractionValue = Int64(paddedFraction.isEmpty ? "0" : paddedFraction) else {
             throw DomainError.invalidPrice(input)
         }
-        let scaled = wholeValue * scale + fractionValue
+        let wholeScaled = wholeValue * scale
+        let sum = wholeScaled.addingReportingOverflow(fractionValue)
+        guard !sum.overflow else {
+            throw DomainError.priceScaleOverflow(input)
+        }
+        let scaled = sum.partialValue
         guard scaled > 0 else { throw DomainError.invalidPrice(input) }
         return PriceScaled(rawValue: scaled, digits: digits)
     }

@@ -18,24 +18,31 @@ public struct BarHash: RawRepresentable, Codable, Hashable, Sendable, Comparable
     public static func compute(
         brokerSourceId: BrokerSourceId,
         logicalSymbol: LogicalSymbol,
+        mt5Symbol: MT5Symbol,
+        timeframe: Timeframe,
         utcTime: UtcSecond,
         mt5ServerTime: MT5ServerSecond,
         open: PriceScaled,
         high: PriceScaled,
         low: PriceScaled,
-        close: PriceScaled
+        close: PriceScaled,
+        digits: Digits
     ) -> BarHash {
         var hasher = FNV1a64()
         hasher.append(brokerSourceId.rawValue)
         hasher.append(logicalSymbol.rawValue)
+        hasher.append(mt5Symbol.rawValue)
+        hasher.append(timeframe.rawValue)
         hasher.append(utcTime.rawValue)
         hasher.append(mt5ServerTime.rawValue)
         hasher.append(open.rawValue)
         hasher.append(high.rawValue)
         hasher.append(low.rawValue)
         hasher.append(close.rawValue)
+        hasher.append(Int64(digits.rawValue))
         return BarHash(rawValue: hasher.value)
     }
+
 }
 
 public struct FNV1a64: Sendable {
