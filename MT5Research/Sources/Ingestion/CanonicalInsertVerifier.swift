@@ -2,6 +2,18 @@ import ClickHouse
 import Domain
 import Foundation
 
+public struct CanonicalInsertVerificationResult: Sendable, Equatable {
+    public let rowCount: Int
+    public let expectedCanonicalSHA256: SHA256DigestHex
+    public let canonicalReadbackSHA256: SHA256DigestHex
+
+    public init(rowCount: Int, expectedCanonicalSHA256: SHA256DigestHex, canonicalReadbackSHA256: SHA256DigestHex) {
+        self.rowCount = rowCount
+        self.expectedCanonicalSHA256 = expectedCanonicalSHA256
+        self.canonicalReadbackSHA256 = canonicalReadbackSHA256
+    }
+}
+
 public struct CanonicalInsertVerifier: Sendable {
     private let clickHouse: ClickHouseClientProtocol
     private let insertBuilder: ClickHouseInsertBuilder
@@ -11,9 +23,21 @@ public struct CanonicalInsertVerifier: Sendable {
         self.insertBuilder = insertBuilder
     }
 
-    public func verify(_ bars: [ValidatedBar]) async throws {
-        guard !bars.isEmpty else { return }
-        let body = try await clickHouse.execute(try insertBuilder.canonicalRangeIntegrityCheck(bars))
+    @discardableResult
+    public func verify(
+        _ bars: [ValidatedBar],
+        mt5Start: MT5ServerSecond? = nil,
+        mt5EndExclusive: MT5ServerSecond? = nil
+    ) async throws -> CanonicalInsertVerificationResult {
+        guard !bars.isEmpty else {
+            let digest = ChunkHashing.emptySHA256(namespace: "canonical_insert_verifier_empty")
+            return CanonicalInsertVerificationResult(rowCount: 0, expectedCanonicalSHA256: digest, canonicalReadbackSHA256: digest)
+        }
+        let body = try await clickHouse.execute(try insertBuilder.canonicalRangeIntegrityCheck(
+            bars,
+            mt5Start: mt5Start,
+            mt5EndExclusive: mt5EndExclusive
+        ))
         let readback = try parseReadback(body)
         let expected = bars.count
         guard readback.rowCount == expected else {
@@ -38,7 +62,11 @@ public struct CanonicalInsertVerifier: Sendable {
             throw IngestError.canonicalInsertVerificationFailed("canonical readback contains \(readback.nonVerifiedOffsetRows) non-verified UTC offset row(s)")
         }
 
-        let rowsBody = try await clickHouse.execute(try insertBuilder.canonicalRangeReadbackRows(bars))
+        let rowsBody = try await clickHouse.execute(try insertBuilder.canonicalRangeReadbackRows(
+            bars,
+            mt5Start: mt5Start,
+            mt5EndExclusive: mt5EndExclusive
+        ))
         let rows = try parseRows(rowsBody)
         guard rows.count == bars.count else {
             throw IngestError.canonicalInsertVerificationFailed("expected \(bars.count) readback rows, got \(rows.count)")
@@ -49,6 +77,8 @@ public struct CanonicalInsertVerifier: Sendable {
                   row.timeframe == bar.timeframe,
                   row.mt5ServerTime == bar.mt5ServerTime,
                   row.utcTime == bar.utcTime,
+                  row.serverUtcOffset == bar.serverUtcOffset,
+                  row.offsetSource == bar.offsetSource,
                   row.offsetConfidence == bar.offsetConfidence,
                   row.open == bar.open.rawValue,
                   row.high == bar.high.rawValue,
@@ -61,6 +91,86 @@ public struct CanonicalInsertVerifier: Sendable {
                 )
             }
         }
+        guard let first = bars.first, let last = bars.last else {
+            throw IngestError.canonicalInsertVerificationFailed("canonical readback hash requested for empty range")
+        }
+        let hashStart = mt5Start ?? first.mt5ServerTime
+        let hashEndExclusive: MT5ServerSecond
+        if let mt5EndExclusive {
+            hashEndExclusive = mt5EndExclusive
+        } else {
+            hashEndExclusive = try addOneMinute(to: last.mt5ServerTime)
+        }
+        guard hashStart.rawValue <= first.mt5ServerTime.rawValue,
+              hashEndExclusive.rawValue > last.mt5ServerTime.rawValue else {
+            throw IngestError.canonicalInsertVerificationFailed(
+                "canonical hash envelope \(hashStart.rawValue)..<\(hashEndExclusive.rawValue) does not cover readback bars"
+            )
+        }
+        let expectedHash = ChunkHashing.canonicalSHA256(
+            brokerSourceId: first.brokerSourceId,
+            logicalSymbol: first.logicalSymbol,
+            mt5Symbol: first.mt5Symbol,
+            timeframe: first.timeframe,
+            mt5Start: hashStart,
+            mt5EndExclusive: hashEndExclusive,
+            bars: bars
+        )
+        let readbackHash = ChunkHashing.canonicalSHA256(
+            brokerSourceId: first.brokerSourceId,
+            logicalSymbol: first.logicalSymbol,
+            mt5Symbol: first.mt5Symbol,
+            timeframe: first.timeframe,
+            mt5Start: hashStart,
+            mt5EndExclusive: hashEndExclusive,
+            rows: rows.map(\.canonicalHashRow)
+        )
+        guard expectedHash == readbackHash else {
+            throw IngestError.canonicalInsertVerificationFailed(
+                "SHA-256 canonical readback mismatch: expected \(expectedHash.rawValue), got \(readbackHash.rawValue)"
+            )
+        }
+        return CanonicalInsertVerificationResult(
+            rowCount: rows.count,
+            expectedCanonicalSHA256: expectedHash,
+            canonicalReadbackSHA256: readbackHash
+        )
+    }
+
+    @discardableResult
+    public func verifyEmptyMT5Range(
+        brokerSourceId: BrokerSourceId,
+        logicalSymbol: LogicalSymbol,
+        mt5Symbol: MT5Symbol,
+        mt5Start: MT5ServerSecond,
+        mt5EndExclusive: MT5ServerSecond
+    ) async throws -> CanonicalInsertVerificationResult {
+        let rowsBody = try await clickHouse.execute(insertBuilder.canonicalMT5RangeReadbackRows(
+            brokerSourceId: brokerSourceId,
+            logicalSymbol: logicalSymbol,
+            mt5Start: mt5Start,
+            mt5EndExclusive: mt5EndExclusive
+        ))
+        let rows = try parseRows(rowsBody)
+        guard rows.isEmpty else {
+            throw IngestError.canonicalInsertVerificationFailed(
+                "MT5 source gap \(mt5Start.rawValue)..<\(mt5EndExclusive.rawValue) is not empty in canonical storage; read back \(rows.count) stale row(s)"
+            )
+        }
+        let digest = ChunkHashing.canonicalSHA256(
+            brokerSourceId: brokerSourceId,
+            logicalSymbol: logicalSymbol,
+            mt5Symbol: mt5Symbol,
+            timeframe: .m1,
+            mt5Start: mt5Start,
+            mt5EndExclusive: mt5EndExclusive,
+            rows: []
+        )
+        return CanonicalInsertVerificationResult(
+            rowCount: 0,
+            expectedCanonicalSHA256: digest,
+            canonicalReadbackSHA256: digest
+        )
     }
 
     private func parseReadback(_ body: String) throws -> CanonicalRangeReadback {
@@ -92,18 +202,20 @@ public struct CanonicalInsertVerifier: Sendable {
         guard !trimmed.isEmpty else { return [] }
         return try trimmed.split(separator: "\n", omittingEmptySubsequences: true).map { row in
             let fields = row.split(separator: "\t", omittingEmptySubsequences: false).map { Self.unescapeTabSeparated(String($0)) }
-            guard fields.count == 11,
+            guard fields.count == 13,
                   let mt5Symbol = MT5Symbol(rawValue: fields[0]),
                   let timeframe = Timeframe(rawValue: fields[1]),
                   let mt5 = Int64(fields[2]),
                   let utc = Int64(fields[3]),
-                  let offsetConfidence = OffsetConfidence(rawValue: fields[4]),
-                  let open = Int64(fields[5]),
-                  let high = Int64(fields[6]),
-                  let low = Int64(fields[7]),
-                  let close = Int64(fields[8]),
-                  let digitsValue = Int(fields[9]),
-                  let hashValue = UInt64(fields[10], radix: 16) else {
+                  let offset = Int64(fields[4]),
+                  let offsetSource = OffsetSource(rawValue: fields[5]),
+                  let offsetConfidence = OffsetConfidence(rawValue: fields[6]),
+                  let open = Int64(fields[7]),
+                  let high = Int64(fields[8]),
+                  let low = Int64(fields[9]),
+                  let close = Int64(fields[10]),
+                  let digitsValue = Int(fields[11]),
+                  let hashValue = UInt64(fields[12], radix: 16) else {
                 throw IngestError.canonicalInsertVerificationFailed("invalid ClickHouse canonical readback row '\(row)'")
             }
             let digits = try Digits(digitsValue)
@@ -112,6 +224,8 @@ public struct CanonicalInsertVerifier: Sendable {
                 timeframe: timeframe,
                 mt5ServerTime: MT5ServerSecond(rawValue: mt5),
                 utcTime: UtcSecond(rawValue: utc),
+                serverUtcOffset: OffsetSeconds(rawValue: offset),
+                offsetSource: offsetSource,
                 offsetConfidence: offsetConfidence,
                 open: open,
                 high: high,
@@ -147,6 +261,14 @@ public struct CanonicalInsertVerifier: Sendable {
         }
         return result
     }
+
+    private func addOneMinute(to value: MT5ServerSecond) throws -> MT5ServerSecond {
+        let result = value.rawValue.addingReportingOverflow(Timeframe.m1.seconds)
+        guard !result.overflow else {
+            throw IngestError.canonicalInsertVerificationFailed("MT5 server timestamp overflow while hashing canonical readback")
+        }
+        return MT5ServerSecond(rawValue: result.partialValue)
+    }
 }
 
 private struct CanonicalRangeReadback: Sendable {
@@ -164,6 +286,8 @@ private struct CanonicalRangeRow: Sendable {
     let timeframe: Timeframe
     let mt5ServerTime: MT5ServerSecond
     let utcTime: UtcSecond
+    let serverUtcOffset: OffsetSeconds
+    let offsetSource: OffsetSource
     let offsetConfidence: OffsetConfidence
     let open: Int64
     let high: Int64
@@ -171,4 +295,20 @@ private struct CanonicalRangeRow: Sendable {
     let close: Int64
     let digits: Digits
     let barHash: BarHash
+
+    var canonicalHashRow: CanonicalChunkHashRow {
+        CanonicalChunkHashRow(
+            mt5ServerTime: mt5ServerTime,
+            utcTime: utcTime,
+            serverUtcOffset: serverUtcOffset,
+            offsetSource: offsetSource,
+            offsetConfidence: offsetConfidence,
+            openScaled: open,
+            highScaled: high,
+            lowScaled: low,
+            closeScaled: close,
+            digits: digits,
+            barHash: barHash
+        )
+    }
 }

@@ -254,7 +254,7 @@ This creates:
 
 Raw audit data is append-only. Repairs only target canonical data and must preserve conflicts, repair logs, ingest operation history, and verified coverage records.
 
-Canonical ingestion is replace-by-range for the affected broker/source/symbol range. Swift first asks the EA for a manifest-backed MT5 range, reads it twice, and only accepts it when the source hash, row count, first/last timestamps, closed-bar boundary, and history synchronization metadata are stable. Before replacing a canonical range, Swift reads existing canonical rows for the same UTC identities and writes `ohlc_m1_conflicts` rows for any differing OHLC/hash values. The delete predicate then covers both the raw MT5 server-time range and the converted UTC identity range before reinserting verified rows. After the replacement insert, Swift reads the canonical range back from ClickHouse and verifies row count, unique MT5 and UTC timestamp counts, single MT5 symbol/timeframe/digits identity, zero non-verified UTC offset rows, and the exact MT5 timestamp/UTC/OHLC/digits/hash sequence before advancing the checkpoint. Each chunk writes an `ingest_operations` trail and then a verified coverage certificate split at broker UTC-offset segment boundaries, so DST/server-offset changes cannot over-certify UTC coverage. This prevents duplicate canonical bars after a crash between insert and checkpoint update, catches older rows written under a wrong UTC mapping, blocks consumers after unfinished writes, and preserves conflicting canonical versions for audit. Raw audit rows remain append-only.
+Canonical ingestion is replace-by-range for the affected broker/source/symbol range. Swift first asks the EA for a manifest-backed MT5 range, reads it twice, and only accepts it when the source hash, row count, first/last timestamps, closed-bar boundary, and history synchronization metadata are stable. Every accepted chunk now also carries SHA-256 evidence: the semantic MT5 source response, the verified broker-offset authority snapshot, and the canonical ClickHouse readback digest after insert. Before replacing a canonical range, Swift reads existing canonical rows for the same UTC identities and writes `ohlc_m1_conflicts` rows for any differing OHLC/hash values. The delete predicate then covers both the raw MT5 server-time envelope and the converted UTC identity range before reinserting verified rows. After the replacement insert, Swift reads the full requested MT5 server-time envelope back from ClickHouse and verifies row count, unique MT5 and UTC timestamp counts, single MT5 symbol/timeframe/digits identity, zero non-verified UTC offset rows, the exact MT5 timestamp/UTC/OHLC/digits/hash sequence, and matching canonical SHA-256 before advancing the checkpoint. Each chunk writes an `ingest_operations` trail and then a SHA-256-backed verified coverage certificate split at broker UTC-offset segment boundaries, so DST/server-offset changes cannot over-certify UTC coverage. This prevents duplicate canonical bars after a crash between insert and checkpoint update, catches older rows written under a wrong UTC mapping, blocks consumers after unfinished or non-SHA-protected writes, and preserves conflicting canonical versions for audit. Raw audit rows remain append-only.
 
 ## Crash Or Abort Recovery
 
@@ -270,7 +270,7 @@ Safe recovery sequence:
 .build/release/FXExport supervise --config-dir Config
 ```
 
-Backfill is designed to be rerun. A checkpoint is advanced only after MT5 source double-read verification, raw insert, canonical range replacement, canonical insert, canonical readback verification, and verified coverage write all succeed. If the process crashes before that point, rerunning backfill starts again from the last verified checkpoint. Canonical rows for the retried range are deleted and reinserted by both MT5 server-time range and UTC identity range, so duplicate canonical bars should not accumulate. Until the retried deterministic batch reaches a terminal status in `ingest_operations`, `data-check` and the read-only history API block the affected database from being used for backtests.
+Backfill is designed to be rerun. A checkpoint is advanced only after MT5 source double-read verification, raw insert, canonical range replacement, canonical insert, canonical readback verification, SHA-256 chunk evidence, and verified coverage write all succeed. If the process crashes before that point, rerunning backfill starts again from the last verified checkpoint. Canonical rows for the retried range are deleted and reinserted by both MT5 server-time range and UTC identity range, so duplicate canonical bars should not accumulate. Until the retried deterministic batch reaches a terminal status in `ingest_operations`, `data-check` and the read-only history API block the affected database from being used for backtests.
 
 Do not run `backfill`, `live`, `repair`, or `supervise` in parallel for the same `broker_source_id`. The CLI enforces this with a broker-level runtime lock under `/tmp`; if another writer or supervisor is active, the second command exits before touching MT5, canonical data, or checkpoints.
 
@@ -280,7 +280,7 @@ If MT5 exposes older historical bars after the first partial run, backfill now d
 
 If the checkpoint references a different configured MT5 symbol, or the checkpoint is newer than MT5's latest closed bar, ingestion stops for that symbol. Treat that as a broker/source identity problem and inspect config, MT5 account/server, and `broker_time_offsets` before continuing.
 
-Raw audit rows are append-only. A crash/retry may leave repeated raw audit attempts with the same deterministic `batch_id`, but canonical history data is rewritten and verified before the checkpoint moves. Empty MT5 source ranges, such as weekends, are not treated as data gaps; they are accepted only after the EA returns a stable empty manifest and FXExport records verified coverage for that source gap.
+Raw audit rows are append-only. A crash/retry may leave repeated raw audit attempts with the same deterministic `batch_id`, but canonical history data is rewritten and verified before the checkpoint moves. Empty MT5 source ranges, such as weekends, are not treated as data gaps; they are accepted only after the EA returns a stable empty manifest, the matching canonical MT5 server-time range is proven empty in ClickHouse, and FXExport records SHA-256-backed verified coverage for that source gap.
 
 ## MT5 EA Setup
 
@@ -385,7 +385,7 @@ FXExport only prints "clean" after the relevant safety step has succeeded: valid
 - Any configured symbol has no checkpoint, a non-`live` ingest status, or a checkpoint mapped to a different configured MT5 symbol.
 - The requested data end is beyond the target symbol's latest verified checkpoint.
 - Any ingest/live/repair batch is unfinished or failed according to `ingest_operations`.
-- The requested UTC range is not fully covered by `ohlc_m1_verified_coverage`.
+- The requested UTC range is not fully covered by SHA-256-backed `ohlc_m1_verified_coverage`.
 - Canonical rows contain duplicate UTC identities, OHLC invariant failures, or non-verified offset confidence.
 - Any latest verification range result is not `clean`, or any latest repair range outcome is `failed`.
 - A required safety agent has a current `warning`/`failed` state.
@@ -428,7 +428,7 @@ let request = try HistoricalOhlcRequest(
 let series = try await provider.loadM1Ohlc(request)
 ```
 
-The provider is read-only. It first requires complete verified coverage for the requested UTC interval, then queries `ohlc_m1_canonical`, rejects non-M1 rows, unexpected MT5 symbols when configured, non-verified UTC offsets, non-closed-bar source statuses, duplicate or unsorted UTC timestamps, mixed digits, stored bar-hash mismatches, invalid OHLC invariants, and over-large requests. It does not create local caches because verifier/repair agents may legitimately rewrite canonical ranges after MT5 source-of-truth checks. Let ClickHouse serve the current canonical state; add caches only after a coherent invalidation strategy exists.
+The provider is read-only. It first requires complete verified coverage for the requested UTC interval, and coverage must include the current SHA-256 chunk hash schema plus non-empty MT5 source, canonical readback, and offset-authority digests. It then queries `ohlc_m1_canonical`, rejects non-M1 rows, unexpected MT5 symbols when configured, non-verified UTC offsets, non-closed-bar source statuses, duplicate or unsorted UTC timestamps, mixed digits, stored bar-hash mismatches, invalid OHLC invariants, and over-large requests. It does not create local caches because verifier/repair agents may legitimately rewrite canonical ranges after MT5 source-of-truth checks. Let ClickHouse serve the current canonical state; add caches only after a coherent invalidation strategy exists.
 
 For Metal-capable external apps:
 

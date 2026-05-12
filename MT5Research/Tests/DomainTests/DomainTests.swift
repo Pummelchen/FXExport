@@ -36,6 +36,22 @@ final class DomainTests: XCTestCase {
         XCTAssertEqual(mt5.rawValue, utc.rawValue)
     }
 
+    func testSHA256ChunkHasherIsDeterministicAndLengthChecked() {
+        var first = SHA256ChunkHasher(namespace: "test")
+        first.appendField("symbol", "EURUSD")
+        first.appendField("count", 2)
+
+        var second = SHA256ChunkHasher(namespace: "test")
+        second.appendField("symbol", "EURUSD")
+        second.appendField("count", 2)
+
+        let digest = first.finalize()
+        XCTAssertEqual(digest, second.finalize())
+        XCTAssertEqual(digest.rawValue.count, 64)
+        XCTAssertNotNil(SHA256DigestHex(rawValue: digest.rawValue.uppercased()))
+        XCTAssertNil(SHA256DigestHex(rawValue: "bad"))
+    }
+
     func testRawRepresentableSymbolInitializersDoNotBypassValidation() {
         XCTAssertNil(LogicalSymbol(rawValue: "eurusd"))
         XCTAssertNil(MT5Symbol(rawValue: ""))

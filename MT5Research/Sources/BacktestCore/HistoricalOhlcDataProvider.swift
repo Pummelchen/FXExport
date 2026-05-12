@@ -140,6 +140,10 @@ public struct ClickHouseHistoricalOhlcDataProvider: HistoricalOhlcDataProviding 
         WHERE broker_source_id = '\(Self.sqlLiteral(request.brokerSourceId.rawValue))'
           AND logical_symbol = '\(Self.sqlLiteral(request.logicalSymbol.rawValue))'
           AND timeframe = 'M1'
+          AND hash_schema_version = '\(Self.sqlLiteral(ChunkHashSchemaVersion.sha256V1))'
+          AND length(mt5_source_sha256) = 64
+          AND length(canonical_readback_sha256) = 64
+          AND length(offset_authority_sha256) = 64
           AND utc_range_end_exclusive > \(request.utcStartInclusive.rawValue)
           AND utc_range_start < \(request.utcEndExclusive.rawValue)
         ORDER BY utc_range_start ASC, utc_range_end_exclusive ASC

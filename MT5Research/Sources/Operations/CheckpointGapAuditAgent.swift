@@ -112,6 +112,10 @@ public struct CheckpointGapAuditAgent: ProductionAgent {
         WHERE broker_source_id = '\(SQLText.literal(state.brokerSourceId.rawValue))'
           AND logical_symbol = '\(SQLText.literal(state.logicalSymbol.rawValue))'
           AND timeframe = 'M1'
+          AND hash_schema_version = '\(SQLText.literal(ChunkHashSchemaVersion.sha256V1))'
+          AND length(mt5_source_sha256) = 64
+          AND length(canonical_readback_sha256) = 64
+          AND length(offset_authority_sha256) = 64
           AND utc_range_start <= \(state.latestIngestedClosedUtcTime.rawValue)
           AND utc_range_end_exclusive > \(state.latestIngestedClosedUtcTime.rawValue)
         FORMAT TabSeparated

@@ -14,6 +14,10 @@ CREATE TABLE IF NOT EXISTS {database}.ingest_operations
     source_bar_count Nullable(UInt32),
     canonical_row_count Nullable(UInt32),
     source_hash Nullable(String),
+    hash_schema_version Nullable(String),
+    mt5_source_sha256 Nullable(String),
+    canonical_readback_sha256 Nullable(String),
+    offset_authority_sha256 Nullable(String),
     error_message Nullable(String),
     event_at_utc Int64
 )
@@ -34,6 +38,10 @@ CREATE TABLE IF NOT EXISTS {database}.ohlc_m1_verified_coverage
     source_bar_count UInt32,
     canonical_row_count UInt32,
     source_hash String,
+    hash_schema_version LowCardinality(String),
+    mt5_source_sha256 String,
+    canonical_readback_sha256 String,
+    offset_authority_sha256 String,
     verification_method LowCardinality(String),
     batch_id String,
     verified_at_utc Int64

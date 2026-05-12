@@ -57,6 +57,7 @@ public struct LiveUpdateAgent: Sendable {
             brokerSourceId: config.brokerTime.brokerSourceId,
             terminalIdentity: terminalIdentity
         )
+        let offsetAuthoritySHA256 = offsetMap.authoritySHA256()
         try BrokerOffsetRuntimeVerifier().verify(
             snapshot: bridge.serverTimeSnapshot(),
             offsetMap: offsetMap,
@@ -77,7 +78,8 @@ public struct LiveUpdateAgent: Sendable {
                     insertBuilder: insertBuilder,
                     sourceVerifier: sourceVerifier,
                     coverageBuilder: coverageBuilder,
-                    auditStore: auditStore
+                    auditStore: auditStore,
+                    offsetAuthoritySHA256: offsetAuthoritySHA256
                 )
             } catch let error as MT5BridgeError {
                 throw error
@@ -101,7 +103,8 @@ public struct LiveUpdateAgent: Sendable {
         insertBuilder: ClickHouseInsertBuilder,
         sourceVerifier: MT5SourceRangeVerifier,
         coverageBuilder: CoverageRangeBuilder,
-        auditStore: IngestAuditStore
+        auditStore: IngestAuditStore,
+        offsetAuthoritySHA256: SHA256DigestHex
     ) async throws {
         let latestResponse = try bridge.latestClosedM1Bar(mapping.mt5Symbol)
         guard latestResponse.mt5Symbol == mapping.mt5Symbol.rawValue else {
@@ -162,7 +165,8 @@ public struct LiveUpdateAgent: Sendable {
                 stage: "range_selected",
                 sourceBarCount: nil,
                 canonicalRowCount: nil,
-                sourceHash: nil
+                sourceHash: nil,
+                offsetAuthoritySHA256: offsetAuthoritySHA256
             )
             do {
                 let sourceRange = try await sourceVerifier.fetchStableRange(
@@ -187,7 +191,9 @@ public struct LiveUpdateAgent: Sendable {
                     stage: "mt5_stable_double_read",
                     sourceBarCount: sourceRange.manifest.emittedCount,
                     canonicalRowCount: nil,
-                    sourceHash: sourceRange.sourceHash
+                    sourceHash: sourceRange.sourceHash,
+                    mt5SourceSHA256: sourceRange.sourceSHA256,
+                    offsetAuthoritySHA256: offsetAuthoritySHA256
                 )
                 let closedBars = try sourceRange.response.rates.map {
                     try $0.toClosedM1Bar(logicalSymbol: mapping.logicalSymbol, mt5Symbol: mapping.mt5Symbol, digits: mapping.digits)
@@ -198,6 +204,16 @@ public struct LiveUpdateAgent: Sendable {
                     guard chunkRange.toExclusive.rawValue < overallEndExclusive.rawValue else {
                         throw IngestError.invalidChunk("\(mapping.logicalSymbol.rawValue) final live range \(rangeLabel) was newer than the checkpoint but MT5 returned zero bars")
                     }
+                    let canonicalVerification = try await CanonicalInsertVerifier(
+                        clickHouse: clickHouse,
+                        insertBuilder: insertBuilder
+                    ).verifyEmptyMT5Range(
+                        brokerSourceId: config.brokerTime.brokerSourceId,
+                        logicalSymbol: mapping.logicalSymbol,
+                        mt5Symbol: mapping.mt5Symbol,
+                        mt5Start: chunkRange.from,
+                        mt5EndExclusive: chunkRange.toExclusive
+                    )
                     let coverageRecords = try coverageBuilder.makeRecords(
                         brokerSourceId: config.brokerTime.brokerSourceId,
                         logicalSymbol: mapping.logicalSymbol,
@@ -207,6 +223,9 @@ public struct LiveUpdateAgent: Sendable {
                         sourceBars: sourceRange.response.rates,
                         canonicalBars: [],
                         sourceHash: sourceRange.sourceHash,
+                        mt5SourceSHA256: sourceRange.sourceSHA256,
+                        canonicalReadbackSHA256: canonicalVerification.canonicalReadbackSHA256,
+                        offsetAuthoritySHA256: offsetAuthoritySHA256,
                         verificationMethod: "mt5_stable_double_read_empty",
                         batchId: batchId,
                         verifiedAtUtc: now
@@ -223,7 +242,10 @@ public struct LiveUpdateAgent: Sendable {
                         stage: "empty_source_coverage_written",
                         sourceBarCount: 0,
                         canonicalRowCount: 0,
-                        sourceHash: sourceRange.sourceHash
+                        sourceHash: sourceRange.sourceHash,
+                        mt5SourceSHA256: sourceRange.sourceSHA256,
+                        canonicalReadbackSHA256: canonicalVerification.canonicalReadbackSHA256,
+                        offsetAuthoritySHA256: offsetAuthoritySHA256
                     )
                     logger.ok("\(mapping.logicalSymbol.rawValue) - \(rangeLabel) contains no MT5 bars; source gap verified and checkpoint left unchanged")
                     cursor = chunkRange.toExclusive
@@ -240,7 +262,7 @@ public struct LiveUpdateAgent: Sendable {
                 )
                 logger.info("\(mapping.logicalSymbol.rawValue) - validating \(rangeLabel) for OHLC integrity and verified UTC conversion")
                 let validated = try validator.validateBatch(closedBars, context: context)
-                try await writeValidatedBars(
+                let canonicalVerification = try await writeValidatedBars(
                     validated,
                     insertBuilder: insertBuilder,
                     auditStore: auditStore,
@@ -248,7 +270,9 @@ public struct LiveUpdateAgent: Sendable {
                     batchId: batchId,
                     range: chunkRange,
                     sourceBarCount: sourceRange.manifest.emittedCount,
-                    sourceHash: sourceRange.sourceHash
+                    sourceHash: sourceRange.sourceHash,
+                    mt5SourceSHA256: sourceRange.sourceSHA256,
+                    offsetAuthoritySHA256: offsetAuthoritySHA256
                 )
                 guard let first = validated.first, let last = validated.last else {
                     throw IngestError.invalidChunk("validated live update chunk unexpectedly empty")
@@ -262,6 +286,9 @@ public struct LiveUpdateAgent: Sendable {
                     sourceBars: sourceRange.response.rates,
                     canonicalBars: validated,
                     sourceHash: sourceRange.sourceHash,
+                    mt5SourceSHA256: sourceRange.sourceSHA256,
+                    canonicalReadbackSHA256: canonicalVerification.canonicalReadbackSHA256,
+                    offsetAuthoritySHA256: offsetAuthoritySHA256,
                     verificationMethod: "mt5_stable_double_read_canonical_readback",
                     batchId: batchId,
                     verifiedAtUtc: now
@@ -289,7 +316,10 @@ public struct LiveUpdateAgent: Sendable {
                     stage: "checkpoint_saved",
                     sourceBarCount: sourceRange.manifest.emittedCount,
                     canonicalRowCount: validated.count,
-                    sourceHash: sourceRange.sourceHash
+                    sourceHash: sourceRange.sourceHash,
+                    mt5SourceSHA256: sourceRange.sourceSHA256,
+                    canonicalReadbackSHA256: canonicalVerification.canonicalReadbackSHA256,
+                    offsetAuthoritySHA256: offsetAuthoritySHA256
                 )
                 let verifiedRangeLabel = OperatorStatusText.monthRangeLabel(
                     start: first.utcTime,
@@ -310,6 +340,7 @@ public struct LiveUpdateAgent: Sendable {
                         sourceBarCount: nil,
                         canonicalRowCount: nil,
                         sourceHash: nil,
+                        offsetAuthoritySHA256: offsetAuthoritySHA256,
                         errorMessage: String(describing: error)
                     )
                 } catch {
@@ -329,11 +360,19 @@ public struct LiveUpdateAgent: Sendable {
         batchId: BatchId,
         range: (from: MT5ServerSecond, toExclusive: MT5ServerSecond),
         sourceBarCount: Int,
-        sourceHash: String
-    ) async throws {
-        guard let first = bars.first else { return }
+        sourceHash: String,
+        mt5SourceSHA256: SHA256DigestHex,
+        offsetAuthoritySHA256: SHA256DigestHex
+    ) async throws -> CanonicalInsertVerificationResult {
+        guard let first = bars.first else {
+            throw IngestError.invalidChunk("cannot write an empty validated live update chunk")
+        }
         let rawInsert = insertBuilder.rawBarsInsert(bars)
-        let canonicalDelete = try insertBuilder.canonicalRangeDelete(bars)
+        let canonicalDelete = try insertBuilder.canonicalRangeDelete(
+            bars,
+            mt5Start: range.from,
+            mt5EndExclusive: range.toExclusive
+        )
         let canonicalInsert = try insertBuilder.canonicalBarsInsert(bars)
         try await CanonicalConflictRecorder(clickHouse: clickHouse, insertBuilder: insertBuilder)
             .recordConflictsBeforeCanonicalReplace(bars, detectedAtUtc: first.ingestedAtUtc)
@@ -347,7 +386,9 @@ public struct LiveUpdateAgent: Sendable {
             stage: "raw_audit_written",
             sourceBarCount: sourceBarCount,
             canonicalRowCount: nil,
-            sourceHash: sourceHash
+            sourceHash: sourceHash,
+            mt5SourceSHA256: mt5SourceSHA256,
+            offsetAuthoritySHA256: offsetAuthoritySHA256
         )
         _ = try await clickHouse.execute(canonicalDelete)
         try await recordChunkOperation(
@@ -359,7 +400,9 @@ public struct LiveUpdateAgent: Sendable {
             stage: "canonical_range_deleted",
             sourceBarCount: sourceBarCount,
             canonicalRowCount: nil,
-            sourceHash: sourceHash
+            sourceHash: sourceHash,
+            mt5SourceSHA256: mt5SourceSHA256,
+            offsetAuthoritySHA256: offsetAuthoritySHA256
         )
         _ = try await clickHouse.execute(canonicalInsert)
         try await recordChunkOperation(
@@ -371,9 +414,15 @@ public struct LiveUpdateAgent: Sendable {
             stage: "canonical_written",
             sourceBarCount: sourceBarCount,
             canonicalRowCount: bars.count,
-            sourceHash: sourceHash
+            sourceHash: sourceHash,
+            mt5SourceSHA256: mt5SourceSHA256,
+            offsetAuthoritySHA256: offsetAuthoritySHA256
         )
-        try await CanonicalInsertVerifier(clickHouse: clickHouse, insertBuilder: insertBuilder).verify(bars)
+        let canonicalVerification = try await CanonicalInsertVerifier(clickHouse: clickHouse, insertBuilder: insertBuilder).verify(
+            bars,
+            mt5Start: range.from,
+            mt5EndExclusive: range.toExclusive
+        )
         try await recordChunkOperation(
             auditStore: auditStore,
             mapping: mapping,
@@ -383,8 +432,12 @@ public struct LiveUpdateAgent: Sendable {
             stage: "canonical_readback_verified",
             sourceBarCount: sourceBarCount,
             canonicalRowCount: bars.count,
-            sourceHash: sourceHash
+            sourceHash: sourceHash,
+            mt5SourceSHA256: mt5SourceSHA256,
+            canonicalReadbackSHA256: canonicalVerification.canonicalReadbackSHA256,
+            offsetAuthoritySHA256: offsetAuthoritySHA256
         )
+        return canonicalVerification
     }
 
     private func recordChunkOperation(
@@ -397,8 +450,12 @@ public struct LiveUpdateAgent: Sendable {
         sourceBarCount: Int?,
         canonicalRowCount: Int?,
         sourceHash: String?,
+        mt5SourceSHA256: SHA256DigestHex? = nil,
+        canonicalReadbackSHA256: SHA256DigestHex? = nil,
+        offsetAuthoritySHA256: SHA256DigestHex? = nil,
         errorMessage: String? = nil
     ) async throws {
+        let hasSHA256Evidence = mt5SourceSHA256 != nil || canonicalReadbackSHA256 != nil || offsetAuthoritySHA256 != nil
         try await auditStore.recordOperation(
             brokerSourceId: config.brokerTime.brokerSourceId,
             logicalSymbol: mapping.logicalSymbol,
@@ -412,6 +469,10 @@ public struct LiveUpdateAgent: Sendable {
             sourceBarCount: sourceBarCount,
             canonicalRowCount: canonicalRowCount,
             sourceHash: sourceHash,
+            hashSchemaVersion: hasSHA256Evidence ? ChunkHashing.schemaVersion : nil,
+            mt5SourceSHA256: mt5SourceSHA256,
+            canonicalReadbackSHA256: canonicalReadbackSHA256,
+            offsetAuthoritySHA256: offsetAuthoritySHA256,
             errorMessage: errorMessage
         )
     }

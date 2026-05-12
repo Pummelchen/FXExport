@@ -38,6 +38,9 @@ public struct CoverageRangeBuilder: Sendable {
         sourceBars: [MT5RateDTO],
         canonicalBars: [ValidatedBar],
         sourceHash: String,
+        mt5SourceSHA256: SHA256DigestHex,
+        canonicalReadbackSHA256: SHA256DigestHex,
+        offsetAuthoritySHA256: SHA256DigestHex,
         verificationMethod: String,
         batchId: BatchId,
         verifiedAtUtc: UtcSecond
@@ -73,6 +76,9 @@ public struct CoverageRangeBuilder: Sendable {
                 sourceBarCount: sourceCount,
                 canonicalRowCount: canonicalCount,
                 sourceHash: sourceHash,
+                mt5SourceSHA256: mt5SourceSHA256,
+                canonicalReadbackSHA256: canonicalReadbackSHA256,
+                offsetAuthoritySHA256: offsetAuthoritySHA256,
                 verificationMethod: verificationMethod,
                 batchId: batchId,
                 verifiedAtUtc: verifiedAtUtc
@@ -98,6 +104,9 @@ public struct CoverageRangeBuilder: Sendable {
         sourceBarCount: Int,
         canonicalRowCount: Int,
         sourceHash: String,
+        mt5SourceSHA256: SHA256DigestHex,
+        canonicalReadbackSHA256: SHA256DigestHex,
+        offsetAuthoritySHA256: SHA256DigestHex,
         verificationMethod: String,
         batchId: BatchId,
         verifiedAtUtc: UtcSecond
@@ -133,6 +142,10 @@ public struct CoverageRangeBuilder: Sendable {
             sourceBarCount: sourceBarCount,
             canonicalRowCount: canonicalRowCount,
             sourceHash: sourceHash,
+            hashSchemaVersion: ChunkHashing.schemaVersion,
+            mt5SourceSHA256: mt5SourceSHA256,
+            canonicalReadbackSHA256: canonicalReadbackSHA256,
+            offsetAuthoritySHA256: offsetAuthoritySHA256,
             verificationMethod: verificationMethod,
             batchId: batchId,
             verifiedAtUtc: verifiedAtUtc

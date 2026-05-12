@@ -60,18 +60,29 @@ public struct ClickHouseInsertBuilder: Sendable {
         return ClickHouseQuery.mutation(sql, idempotent: false)
     }
 
-    public func canonicalRangeDelete(_ bars: [ValidatedBar]) throws -> ClickHouseQuery {
+    public func canonicalRangeDelete(
+        _ bars: [ValidatedBar],
+        mt5Start: MT5ServerSecond? = nil,
+        mt5EndExclusive: MT5ServerSecond? = nil
+    ) throws -> ClickHouseQuery {
         let range = try canonicalRangeIdentity(bars)
         guard let first = range.first, let last = range.last else {
             return ClickHouseQuery.mutation("SELECT 1", idempotent: true)
+        }
+        let start = mt5Start ?? first.mt5ServerTime
+        let endComparison: String
+        if let mt5EndExclusive {
+            endComparison = "mt5_server_ts_raw < \(mt5EndExclusive.rawValue)"
+        } else {
+            endComparison = "mt5_server_ts_raw <= \(last.mt5ServerTime.rawValue)"
         }
         let sql = """
         ALTER TABLE \(database).ohlc_m1_canonical DELETE
         WHERE broker_source_id = '\(sqlLiteral(first.brokerSourceId.rawValue))'
           AND logical_symbol = '\(sqlLiteral(first.logicalSymbol.rawValue))'
           AND (
-              (mt5_server_ts_raw >= \(first.mt5ServerTime.rawValue)
-               AND mt5_server_ts_raw <= \(last.mt5ServerTime.rawValue))
+              (mt5_server_ts_raw >= \(start.rawValue)
+               AND \(endComparison))
               OR
               (ts_utc >= \(first.utcTime.rawValue)
                AND ts_utc <= \(last.utcTime.rawValue))
@@ -81,10 +92,26 @@ public struct ClickHouseInsertBuilder: Sendable {
         return ClickHouseQuery.mutation(sql, idempotent: true)
     }
 
-    public func canonicalRangeIntegrityCheck(_ bars: [ValidatedBar]) throws -> ClickHouseQuery {
+    public func canonicalRangeIntegrityCheck(
+        _ bars: [ValidatedBar],
+        mt5Start: MT5ServerSecond? = nil,
+        mt5EndExclusive: MT5ServerSecond? = nil
+    ) throws -> ClickHouseQuery {
         let range = try canonicalRangeIdentity(bars)
         guard let first = range.first, let last = range.last else {
             return .select("SELECT 0, 0, 0, 0, 0, 0, 0 FORMAT TabSeparated")
+        }
+        let predicate: String
+        if let mt5Start, let mt5EndExclusive {
+            predicate = """
+              AND mt5_server_ts_raw >= \(mt5Start.rawValue)
+              AND mt5_server_ts_raw < \(mt5EndExclusive.rawValue)
+            """
+        } else {
+            predicate = """
+              AND ts_utc >= \(first.utcTime.rawValue)
+              AND ts_utc <= \(last.utcTime.rawValue)
+            """
         }
         let sql = """
         SELECT
@@ -98,27 +125,63 @@ public struct ClickHouseInsertBuilder: Sendable {
         FROM \(database).ohlc_m1_canonical
         WHERE broker_source_id = '\(sqlLiteral(first.brokerSourceId.rawValue))'
           AND logical_symbol = '\(sqlLiteral(first.logicalSymbol.rawValue))'
-          AND ts_utc >= \(first.utcTime.rawValue)
-          AND ts_utc <= \(last.utcTime.rawValue)
+        \(predicate)
         FORMAT TabSeparated
         """
         return .select(sql)
     }
 
-    public func canonicalRangeReadbackRows(_ bars: [ValidatedBar]) throws -> ClickHouseQuery {
+    public func canonicalRangeReadbackRows(
+        _ bars: [ValidatedBar],
+        mt5Start: MT5ServerSecond? = nil,
+        mt5EndExclusive: MT5ServerSecond? = nil
+    ) throws -> ClickHouseQuery {
         let range = try canonicalRangeIdentity(bars)
         guard let first = range.first, let last = range.last else {
-            return .select("SELECT mt5_symbol, timeframe, mt5_server_ts_raw, ts_utc, offset_confidence, open_scaled, high_scaled, low_scaled, close_scaled, digits, bar_hash FROM \(database).ohlc_m1_canonical WHERE 0 FORMAT TabSeparated")
+            return .select("SELECT mt5_symbol, timeframe, mt5_server_ts_raw, ts_utc, server_utc_offset_seconds, offset_source, offset_confidence, open_scaled, high_scaled, low_scaled, close_scaled, digits, bar_hash FROM \(database).ohlc_m1_canonical WHERE 0 FORMAT TabSeparated")
+        }
+        let predicate: String
+        if let mt5Start, let mt5EndExclusive {
+            predicate = """
+              AND mt5_server_ts_raw >= \(mt5Start.rawValue)
+              AND mt5_server_ts_raw < \(mt5EndExclusive.rawValue)
+            """
+        } else {
+            predicate = """
+              AND ts_utc >= \(first.utcTime.rawValue)
+              AND ts_utc <= \(last.utcTime.rawValue)
+            """
         }
         let sql = """
-        SELECT mt5_symbol, timeframe, mt5_server_ts_raw, ts_utc, offset_confidence,
+        SELECT mt5_symbol, timeframe, mt5_server_ts_raw, ts_utc,
+               server_utc_offset_seconds, offset_source, offset_confidence,
                open_scaled, high_scaled, low_scaled, close_scaled, digits, bar_hash
         FROM \(database).ohlc_m1_canonical
         WHERE broker_source_id = '\(sqlLiteral(first.brokerSourceId.rawValue))'
           AND logical_symbol = '\(sqlLiteral(first.logicalSymbol.rawValue))'
-          AND ts_utc >= \(first.utcTime.rawValue)
-          AND ts_utc <= \(last.utcTime.rawValue)
-        ORDER BY ts_utc ASC
+        \(predicate)
+        ORDER BY mt5_server_ts_raw ASC, ts_utc ASC
+        FORMAT TabSeparated
+        """
+        return .select(sql)
+    }
+
+    public func canonicalMT5RangeReadbackRows(
+        brokerSourceId: BrokerSourceId,
+        logicalSymbol: LogicalSymbol,
+        mt5Start: MT5ServerSecond,
+        mt5EndExclusive: MT5ServerSecond
+    ) -> ClickHouseQuery {
+        let sql = """
+        SELECT mt5_symbol, timeframe, mt5_server_ts_raw, ts_utc,
+               server_utc_offset_seconds, offset_source, offset_confidence,
+               open_scaled, high_scaled, low_scaled, close_scaled, digits, bar_hash
+        FROM \(database).ohlc_m1_canonical
+        WHERE broker_source_id = '\(sqlLiteral(brokerSourceId.rawValue))'
+          AND logical_symbol = '\(sqlLiteral(logicalSymbol.rawValue))'
+          AND mt5_server_ts_raw >= \(mt5Start.rawValue)
+          AND mt5_server_ts_raw < \(mt5EndExclusive.rawValue)
+        ORDER BY mt5_server_ts_raw ASC, ts_utc ASC
         FORMAT TabSeparated
         """
         return .select(sql)

@@ -60,11 +60,13 @@ public struct StableMT5SourceRange: Sendable {
     public let response: RatesResponseDTO
     public let manifest: MT5RangeManifest
     public let sourceHash: String
+    public let sourceSHA256: SHA256DigestHex
 
-    public init(response: RatesResponseDTO, manifest: MT5RangeManifest, sourceHash: String) {
+    public init(response: RatesResponseDTO, manifest: MT5RangeManifest, sourceHash: String, sourceSHA256: SHA256DigestHex) {
         self.response = response
         self.manifest = manifest
         self.sourceHash = sourceHash
+        self.sourceSHA256 = sourceSHA256
     }
 }
 
@@ -79,6 +81,7 @@ private struct MT5SourceSignature: Equatable, Sendable {
     let first: Int64
     let last: Int64
     let sourceHash: String
+    let sourceSHA256: SHA256DigestHex
 }
 
 public struct MT5SourceRangeVerifier: Sendable {
@@ -209,7 +212,8 @@ public struct MT5SourceRangeVerifier: Sendable {
         return StableMT5SourceRange(
             response: response,
             manifest: manifest,
-            sourceHash: Self.sourceHash(response.rates)
+            sourceHash: Self.sourceHash(response.rates),
+            sourceSHA256: ChunkHashing.mt5SourceSHA256(response: response, manifest: manifest)
         )
     }
 
@@ -280,7 +284,8 @@ public struct MT5SourceRangeVerifier: Sendable {
             emittedCount: range.manifest.emittedCount,
             first: range.manifest.firstMT5ServerTime?.rawValue ?? 0,
             last: range.manifest.lastMT5ServerTime?.rawValue ?? 0,
-            sourceHash: range.sourceHash
+            sourceHash: range.sourceHash,
+            sourceSHA256: range.sourceSHA256
         )
     }
 

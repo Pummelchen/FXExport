@@ -51,6 +51,17 @@ public struct RepairAgent: Sendable {
                     throw RepairError.refused("verified coverage records do not match the requested repair range")
                 }
             }
+            guard !verifiedCoverage.isEmpty else {
+                throw RepairError.refused("repair requires SHA-256 verified MT5 coverage records")
+            }
+            let offsetAuthorityDigests = Set(verifiedCoverage.map(\.offsetAuthoritySHA256))
+            guard offsetAuthorityDigests.count == 1, let offsetAuthoritySHA256 = offsetAuthorityDigests.first else {
+                throw RepairError.refused("repair coverage was produced from multiple broker UTC offset authority snapshots")
+            }
+            let mt5SourceSHA256 = ChunkHashing.combinedSHA256(
+                namespace: "repair_mt5_source_coverage",
+                values: verifiedCoverage.map(\.mt5SourceSHA256)
+            )
             let rangeLabel = OperatorStatusText.monthRangeLabel(start: range.mt5Start, endExclusive: range.mt5EndExclusive)
             logger.repair("\(range.logicalSymbol.rawValue) - repairing canonical M1 OHLC for \(rangeLabel): \(reason)")
             guard !replacementBars.isEmpty else {
@@ -97,7 +108,9 @@ public struct RepairAgent: Sendable {
                     stage: "repair_started",
                     sourceBarCount: replacementBars.count,
                     canonicalRowCount: nil,
-                    sourceHash: sourceHash
+                    sourceHash: sourceHash,
+                    mt5SourceSHA256: mt5SourceSHA256,
+                    offsetAuthoritySHA256: offsetAuthoritySHA256
                 )
                 try await recordRepairOperation(
                     auditStore: auditStore,
@@ -108,7 +121,9 @@ public struct RepairAgent: Sendable {
                     stage: "mt5_source_complete",
                     sourceBarCount: replacementBars.count,
                     canonicalRowCount: nil,
-                    sourceHash: sourceHash
+                    sourceHash: sourceHash,
+                    mt5SourceSHA256: mt5SourceSHA256,
+                    offsetAuthoritySHA256: offsetAuthoritySHA256
                 )
                 try await CanonicalConflictRecorder(clickHouse: clickHouse, insertBuilder: insertBuilder)
                     .recordConflictsBeforeCanonicalReplace(replacementBars, detectedAtUtc: UtcSecond(rawValue: Int64(Date().timeIntervalSince1970)))
@@ -122,7 +137,9 @@ public struct RepairAgent: Sendable {
                     stage: "canonical_range_deleted",
                     sourceBarCount: replacementBars.count,
                     canonicalRowCount: nil,
-                    sourceHash: sourceHash
+                    sourceHash: sourceHash,
+                    mt5SourceSHA256: mt5SourceSHA256,
+                    offsetAuthoritySHA256: offsetAuthoritySHA256
                 )
                 _ = try await clickHouse.execute(insertQuery)
                 try await recordRepairOperation(
@@ -134,9 +151,15 @@ public struct RepairAgent: Sendable {
                     stage: "canonical_written",
                     sourceBarCount: replacementBars.count,
                     canonicalRowCount: replacementBars.count,
-                    sourceHash: sourceHash
+                    sourceHash: sourceHash,
+                    mt5SourceSHA256: mt5SourceSHA256,
+                    offsetAuthoritySHA256: offsetAuthoritySHA256
                 )
-                try await CanonicalInsertVerifier(clickHouse: clickHouse, insertBuilder: insertBuilder).verify(replacementBars)
+                let canonicalVerification = try await CanonicalInsertVerifier(clickHouse: clickHouse, insertBuilder: insertBuilder).verify(
+                    replacementBars,
+                    mt5Start: range.mt5Start,
+                    mt5EndExclusive: range.mt5EndExclusive
+                )
                 for coverage in verifiedCoverage {
                     try await auditStore.recordVerifiedCoverage(coverage)
                 }
@@ -149,7 +172,10 @@ public struct RepairAgent: Sendable {
                     stage: "canonical_readback_verified",
                     sourceBarCount: replacementBars.count,
                     canonicalRowCount: replacementBars.count,
-                    sourceHash: sourceHash
+                    sourceHash: sourceHash,
+                    mt5SourceSHA256: mt5SourceSHA256,
+                    canonicalReadbackSHA256: canonicalVerification.canonicalReadbackSHA256,
+                    offsetAuthoritySHA256: offsetAuthoritySHA256
                 )
                 try await recordRepairOperation(
                     auditStore: auditStore,
@@ -160,7 +186,10 @@ public struct RepairAgent: Sendable {
                     stage: "repair_verified",
                     sourceBarCount: replacementBars.count,
                     canonicalRowCount: replacementBars.count,
-                    sourceHash: sourceHash
+                    sourceHash: sourceHash,
+                    mt5SourceSHA256: mt5SourceSHA256,
+                    canonicalReadbackSHA256: canonicalVerification.canonicalReadbackSHA256,
+                    offsetAuthoritySHA256: offsetAuthoritySHA256
                 )
                 try await writeRepairLog(
                     range: range,
@@ -183,6 +212,8 @@ public struct RepairAgent: Sendable {
                         sourceBarCount: replacementBars.count,
                         canonicalRowCount: nil,
                         sourceHash: sourceHash,
+                        mt5SourceSHA256: mt5SourceSHA256,
+                        offsetAuthoritySHA256: offsetAuthoritySHA256,
                         errorMessage: String(describing: repairError)
                     )
                 } catch {
@@ -242,8 +273,12 @@ public struct RepairAgent: Sendable {
         sourceBarCount: Int?,
         canonicalRowCount: Int?,
         sourceHash: String?,
+        mt5SourceSHA256: SHA256DigestHex? = nil,
+        canonicalReadbackSHA256: SHA256DigestHex? = nil,
+        offsetAuthoritySHA256: SHA256DigestHex? = nil,
         errorMessage: String? = nil
     ) async throws {
+        let hasSHA256Evidence = mt5SourceSHA256 != nil || canonicalReadbackSHA256 != nil || offsetAuthoritySHA256 != nil
         try await auditStore.recordOperation(
             brokerSourceId: range.brokerSourceId,
             logicalSymbol: range.logicalSymbol,
@@ -257,6 +292,10 @@ public struct RepairAgent: Sendable {
             sourceBarCount: sourceBarCount,
             canonicalRowCount: canonicalRowCount,
             sourceHash: sourceHash,
+            hashSchemaVersion: hasSHA256Evidence ? ChunkHashing.schemaVersion : nil,
+            mt5SourceSHA256: mt5SourceSHA256,
+            canonicalReadbackSHA256: canonicalReadbackSHA256,
+            offsetAuthoritySHA256: offsetAuthoritySHA256,
             errorMessage: errorMessage
         )
     }

@@ -126,6 +126,7 @@ public struct HistoricalRangeVerifier: Sendable {
         let validator = OhlcValidator(timeConverter: TimeConverter(offsetMap: offsetMap))
         let coverageBuilder = CoverageRangeBuilder(offsetMap: offsetMap)
         let sourceVerifier = MT5SourceRangeVerifier()
+        let offsetAuthoritySHA256 = offsetMap.authoritySHA256()
         while cursor.rawValue < range.mt5EndExclusive.rawValue {
             let chunkEnd = try chunkEndExclusive(cursor: cursor, rangeEndExclusive: range.mt5EndExclusive)
             let chunkLabel = OperatorStatusText.monthRangeLabel(start: cursor, endExclusive: chunkEnd)
@@ -164,6 +165,15 @@ public struct HistoricalRangeVerifier: Sendable {
             )
             let validated = try validator.validateBatch(closedBars, context: context)
             output.append(contentsOf: validated)
+            let canonicalSHA256 = ChunkHashing.canonicalSHA256(
+                brokerSourceId: range.brokerSourceId,
+                logicalSymbol: range.logicalSymbol,
+                mt5Symbol: mapping.mt5Symbol,
+                timeframe: .m1,
+                mt5Start: cursor,
+                mt5EndExclusive: chunkEnd,
+                bars: validated
+            )
             coverage.append(contentsOf: try coverageBuilder.makeRecords(
                 brokerSourceId: range.brokerSourceId,
                 logicalSymbol: range.logicalSymbol,
@@ -173,6 +183,9 @@ public struct HistoricalRangeVerifier: Sendable {
                 sourceBars: sourceRange.response.rates,
                 canonicalBars: validated,
                 sourceHash: sourceRange.sourceHash,
+                mt5SourceSHA256: sourceRange.sourceSHA256,
+                canonicalReadbackSHA256: canonicalSHA256,
+                offsetAuthoritySHA256: offsetAuthoritySHA256,
                 verificationMethod: "mt5_verifier_stable_double_read",
                 batchId: batchId,
                 verifiedAtUtc: context.ingestedAtUtc

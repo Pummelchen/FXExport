@@ -34,6 +34,10 @@ public struct VerifiedCoverageRecord: Sendable {
     public let sourceBarCount: Int
     public let canonicalRowCount: Int
     public let sourceHash: String
+    public let hashSchemaVersion: String
+    public let mt5SourceSHA256: SHA256DigestHex
+    public let canonicalReadbackSHA256: SHA256DigestHex
+    public let offsetAuthoritySHA256: SHA256DigestHex
     public let verificationMethod: String
     public let batchId: BatchId
     public let verifiedAtUtc: UtcSecond
@@ -61,11 +65,15 @@ public struct IngestAuditStore: Sendable {
         sourceBarCount: Int?,
         canonicalRowCount: Int?,
         sourceHash: String?,
+        hashSchemaVersion: String? = nil,
+        mt5SourceSHA256: SHA256DigestHex? = nil,
+        canonicalReadbackSHA256: SHA256DigestHex? = nil,
+        offsetAuthoritySHA256: SHA256DigestHex? = nil,
         errorMessage: String? = nil,
         eventAtUtc: UtcSecond = UtcSecond(rawValue: Int64(Date().timeIntervalSince1970))
     ) async throws {
         var fields: [String] = []
-        fields.reserveCapacity(16)
+        fields.reserveCapacity(20)
         fields.append(tsv(brokerSourceId.rawValue))
         fields.append(tsv(logicalSymbol.rawValue))
         fields.append(tsv(mt5Symbol.rawValue))
@@ -80,6 +88,10 @@ public struct IngestAuditStore: Sendable {
         fields.append(sourceBarCount.map { String($0) } ?? "\\N")
         fields.append(canonicalRowCount.map { String($0) } ?? "\\N")
         fields.append(sourceHash.map(tsv) ?? "\\N")
+        fields.append(hashSchemaVersion.map(tsv) ?? "\\N")
+        fields.append(mt5SourceSHA256.map { tsv($0.rawValue) } ?? "\\N")
+        fields.append(canonicalReadbackSHA256.map { tsv($0.rawValue) } ?? "\\N")
+        fields.append(offsetAuthoritySHA256.map { tsv($0.rawValue) } ?? "\\N")
         fields.append(errorMessage.map(tsv) ?? "\\N")
         fields.append(String(eventAtUtc.rawValue))
         let row = fields.joined(separator: "\t")
@@ -88,6 +100,7 @@ public struct IngestAuditStore: Sendable {
             broker_source_id, logical_symbol, mt5_symbol, timeframe, operation_type,
             batch_id, mt5_range_start, mt5_range_end_exclusive,
             status, status_rank, stage, source_bar_count, canonical_row_count, source_hash,
+            hash_schema_version, mt5_source_sha256, canonical_readback_sha256, offset_authority_sha256,
             error_message, event_at_utc
         ) FORMAT TabSeparated
         \(row)
@@ -108,6 +121,10 @@ public struct IngestAuditStore: Sendable {
             String(record.sourceBarCount),
             String(record.canonicalRowCount),
             tsv(record.sourceHash),
+            tsv(record.hashSchemaVersion),
+            tsv(record.mt5SourceSHA256.rawValue),
+            tsv(record.canonicalReadbackSHA256.rawValue),
+            tsv(record.offsetAuthoritySHA256.rawValue),
             tsv(record.verificationMethod),
             tsv(record.batchId.rawValue),
             String(record.verifiedAtUtc.rawValue)
@@ -118,6 +135,7 @@ public struct IngestAuditStore: Sendable {
             mt5_range_start, mt5_range_end_exclusive,
             utc_range_start, utc_range_end_exclusive,
             source_bar_count, canonical_row_count, source_hash,
+            hash_schema_version, mt5_source_sha256, canonical_readback_sha256, offset_authority_sha256,
             verification_method, batch_id, verified_at_utc
         ) FORMAT TabSeparated
         \(row)

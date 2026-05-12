@@ -124,20 +124,22 @@ final class IngestionTests: XCTestCase {
         let bar = try validatedBar(mt5: 120, utc: 60)
         let client = SequenceClickHouseClient(bodies: [
             "1\t1\t1\t1\t1\t1\t0\n",
-            "EURUSD\tM1\t120\t60\tverified\t110000\t110000\t110000\t110000\t5\t\(bar.barHash.description)\n"
+            "EURUSD\tM1\t120\t60\t60\tmanual\tverified\t110000\t110000\t110000\t110000\t5\t\(bar.barHash.description)\n"
         ])
 
-        try await CanonicalInsertVerifier(
+        let result = try await CanonicalInsertVerifier(
             clickHouse: client,
             insertBuilder: ClickHouseInsertBuilder(database: "db")
         ).verify([bar])
+        XCTAssertEqual(result.rowCount, 1)
+        XCTAssertEqual(result.expectedCanonicalSHA256, result.canonicalReadbackSHA256)
     }
 
     func testCanonicalInsertVerifierRejectsHashMismatch() async throws {
         let bar = try validatedBar(mt5: 120, utc: 60)
         let client = SequenceClickHouseClient(bodies: [
             "1\t1\t1\t1\t1\t1\t0\n",
-            "EURUSD\tM1\t120\t60\tverified\t110000\t110000\t110000\t110000\t5\tbad-hash\n"
+            "EURUSD\tM1\t120\t60\t60\tmanual\tverified\t110000\t110000\t110000\t110000\t5\tbad-hash\n"
         ])
 
         await XCTAssertThrowsErrorAsync(try await CanonicalInsertVerifier(
@@ -150,13 +152,33 @@ final class IngestionTests: XCTestCase {
         let bar = try validatedBar(mt5: 120, utc: 60)
         let client = SequenceClickHouseClient(bodies: [
             "1\t1\t1\t1\t1\t1\t0\n",
-            "EURUSD.a\tM1\t120\t60\tverified\t110000\t110000\t110000\t110000\t5\t\(bar.barHash.description)\n"
+            "EURUSD.a\tM1\t120\t60\t60\tmanual\tverified\t110000\t110000\t110000\t110000\t5\t\(bar.barHash.description)\n"
         ])
 
         await XCTAssertThrowsErrorAsync(try await CanonicalInsertVerifier(
             clickHouse: client,
             insertBuilder: ClickHouseInsertBuilder(database: "db")
         ).verify([bar]))
+    }
+
+    func testCanonicalInsertVerifierRejectsStaleRowsInsideEmptyMT5Range() async throws {
+        let bar = try validatedBar(mt5: 120, utc: 60)
+        let client = SequenceClickHouseClient(bodies: [
+            "EURUSD\tM1\t120\t60\t60\tmanual\tverified\t110000\t110000\t110000\t110000\t5\t\(bar.barHash.description)\n"
+        ])
+
+        await XCTAssertThrowsErrorAsync(try await CanonicalInsertVerifier(
+            clickHouse: client,
+            insertBuilder: ClickHouseInsertBuilder(database: "db")
+        ).verifyEmptyMT5Range(
+            brokerSourceId: bar.brokerSourceId,
+            logicalSymbol: bar.logicalSymbol,
+            mt5Symbol: bar.mt5Symbol,
+            mt5Start: MT5ServerSecond(rawValue: 120),
+            mt5EndExclusive: MT5ServerSecond(rawValue: 180)
+        )) { error in
+            XCTAssertTrue(String(describing: error).contains("not empty in canonical storage"))
+        }
     }
 
     func testCanonicalConflictRecorderWritesConflictBeforeReplace() async throws {
@@ -203,6 +225,7 @@ final class IngestionTests: XCTestCase {
         XCTAssertEqual(stable.manifest.emittedCount, 2)
         XCTAssertEqual(stable.response.rates.count, 2)
         XCTAssertTrue(stable.sourceHash.hasPrefix("fnv64:"))
+        XCTAssertEqual(stable.sourceSHA256.rawValue.count, 64)
     }
 
     func testMT5SourceRangeVerifierRejectsUnstableConfirmationRead() async throws {
@@ -288,6 +311,9 @@ final class IngestionTests: XCTestCase {
             sourceBars: rates,
             canonicalBars: [],
             sourceHash: "fnv64:test",
+            mt5SourceSHA256: ChunkHashing.emptySHA256(namespace: "test_mt5"),
+            canonicalReadbackSHA256: ChunkHashing.emptySHA256(namespace: "test_canonical"),
+            offsetAuthoritySHA256: map.authoritySHA256(),
             verificationMethod: "test",
             batchId: BatchId(rawValue: "batch"),
             verifiedAtUtc: UtcSecond(rawValue: 1)
