@@ -5,6 +5,10 @@ public protocol FXBacktestHistoryProviding: Sendable {
     func loadM1History(_ request: FXBacktestM1HistoryRequest) async throws -> FXBacktestM1HistoryResponse
 }
 
+public protocol FXBacktestExecutionProviding: Sendable {
+    func loadExecutionSpec(_ request: FXBacktestExecutionSpecRequest) async throws -> FXBacktestExecutionSpecResponse
+}
+
 public struct FXBacktestHTTPResponse: Sendable, Equatable {
     public let statusCode: Int
     public let contentType: String
@@ -19,9 +23,11 @@ public struct FXBacktestHTTPResponse: Sendable, Equatable {
 
 public struct FXBacktestAPIHTTPHandler: Sendable {
     private let historyProvider: any FXBacktestHistoryProviding
+    private let executionProvider: (any FXBacktestExecutionProviding)?
 
-    public init(historyProvider: any FXBacktestHistoryProviding) {
+    public init(historyProvider: any FXBacktestHistoryProviding, executionProvider: (any FXBacktestExecutionProviding)? = nil) {
         self.historyProvider = historyProvider
+        self.executionProvider = executionProvider
     }
 
     public func handle(method: String, path: String, body: Data) async -> FXBacktestHTTPResponse {
@@ -34,6 +40,16 @@ public struct FXBacktestAPIHTTPHandler: Sendable {
                 let request = try JSONDecoder().decode(FXBacktestM1HistoryRequest.self, from: body)
                 try request.validate()
                 let response = try await historyProvider.loadM1History(request)
+                try response.validate()
+                return try json(response)
+
+            case ("POST", FXBacktestAPIV1.executionSpecPath):
+                guard let executionProvider else {
+                    throw FXBacktestAPIServiceError.executionUnavailable("Execution provider is not configured.")
+                }
+                let request = try JSONDecoder().decode(FXBacktestExecutionSpecRequest.self, from: body)
+                try request.validate()
+                let response = try await executionProvider.loadExecutionSpec(request)
                 try response.validate()
                 return try json(response)
 
@@ -83,6 +99,7 @@ public enum FXBacktestAPIServiceError: Error, Equatable, CustomStringConvertible
     case digitsMismatch(expected: Int, actual: Int)
     case readinessBlocked(String)
     case historyUnavailable(String)
+    case executionUnavailable(String)
 
     public var httpStatus: Int {
         switch self {
@@ -90,7 +107,7 @@ public enum FXBacktestAPIServiceError: Error, Equatable, CustomStringConvertible
             return 400
         case .readinessBlocked:
             return 409
-        case .historyUnavailable:
+        case .historyUnavailable, .executionUnavailable:
             return 502
         }
     }
@@ -111,6 +128,8 @@ public enum FXBacktestAPIServiceError: Error, Equatable, CustomStringConvertible
             return "readiness_blocked"
         case .historyUnavailable:
             return "history_unavailable"
+        case .executionUnavailable:
+            return "execution_unavailable"
         }
     }
 
@@ -130,6 +149,8 @@ public enum FXBacktestAPIServiceError: Error, Equatable, CustomStringConvertible
             return "FXExport backtest readiness gate blocked the request: \(reason)"
         case .historyUnavailable(let reason):
             return "FXExport could not load verified M1 history: \(reason)"
+        case .executionUnavailable(let reason):
+            return "FXExport could not load MT5 execution metadata: \(reason)"
         }
     }
 }

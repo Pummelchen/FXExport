@@ -45,7 +45,7 @@ public struct ClickHouseHTTPClient: ClickHouseClientProtocol, Sendable {
         request.httpBody = query.sql.data(using: .utf8)
         request.setValue("text/plain; charset=utf-8", forHTTPHeaderField: "Content-Type")
         request.setValue("FXExport ClickHouseHTTPClient", forHTTPHeaderField: "User-Agent")
-        if let authorization = Self.basicAuthorization(username: config.username, password: config.password) {
+        if let authorization = Self.basicAuthorization(username: config.username, password: config.resolvedPassword) {
             request.setValue(authorization, forHTTPHeaderField: "Authorization")
         }
 

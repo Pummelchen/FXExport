@@ -22,6 +22,8 @@ public struct AgentFreshnessPolicy: Sendable {
             seconds = max(7_200, supervisor.verificationIntervalSeconds * 2)
         case .checkpointGapAuditor:
             seconds = max(900, supervisor.checkpointAuditIntervalSeconds * 3)
+        case .dataCertification:
+            seconds = max(7_200, supervisor.backupCheckIntervalSeconds * 2)
         case .supervisorCoordinator, .healthMonitor, .historyImporter, .backupReadiness, .alerting:
             seconds = 0
         }

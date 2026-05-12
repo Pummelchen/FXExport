@@ -33,6 +33,7 @@ public struct BrokerTimeOffsetConfig: Codable, Hashable, Sendable {
 
 public struct BrokerTimeConfig: Codable, Sendable {
     public let brokerSourceId: BrokerSourceId
+    public let isAutomatic: Bool
     /// Optional bootstrap/reference segments. Canonical ingestion never trusts this array;
     /// it loads verified offset authority from ClickHouse `broker_time_offsets`.
     public let offsetSegments: [BrokerTimeOffsetConfig]
@@ -41,6 +42,7 @@ public struct BrokerTimeConfig: Codable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case brokerSourceId = "broker_source_id"
+        case isAutomatic = "is_automatic"
         case offsetSegments = "offset_segments"
         case expectedTerminalIdentity = "expected_terminal_identity"
         case acceptedLiveOffsetSeconds = "accepted_live_offset_seconds"
@@ -48,19 +50,42 @@ public struct BrokerTimeConfig: Codable, Sendable {
 
     public init(
         brokerSourceId: BrokerSourceId,
+        isAutomatic: Bool = false,
         offsetSegments: [BrokerTimeOffsetConfig],
         expectedTerminalIdentity: ExpectedTerminalIdentity? = nil,
         acceptedLiveOffsetSeconds: [OffsetSeconds] = []
     ) {
         self.brokerSourceId = brokerSourceId
+        self.isAutomatic = isAutomatic
         self.offsetSegments = offsetSegments
         self.expectedTerminalIdentity = expectedTerminalIdentity
         self.acceptedLiveOffsetSeconds = acceptedLiveOffsetSeconds
     }
 
+    public static func automatic() throws -> BrokerTimeConfig {
+        BrokerTimeConfig(
+            brokerSourceId: try BrokerSourceId("auto"),
+            isAutomatic: true,
+            offsetSegments: [],
+            expectedTerminalIdentity: nil,
+            acceptedLiveOffsetSeconds: []
+        )
+    }
+
+    public func resolving(brokerSourceId: BrokerSourceId) -> BrokerTimeConfig {
+        BrokerTimeConfig(
+            brokerSourceId: brokerSourceId,
+            isAutomatic: false,
+            offsetSegments: offsetSegments,
+            expectedTerminalIdentity: expectedTerminalIdentity,
+            acceptedLiveOffsetSeconds: acceptedLiveOffsetSeconds
+        )
+    }
+
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.brokerSourceId = try container.decode(BrokerSourceId.self, forKey: .brokerSourceId)
+        self.isAutomatic = try container.decodeIfPresent(Bool.self, forKey: .isAutomatic) ?? false
         self.offsetSegments = try container.decodeIfPresent([BrokerTimeOffsetConfig].self, forKey: .offsetSegments) ?? []
         self.expectedTerminalIdentity = try container.decodeIfPresent(ExpectedTerminalIdentity.self, forKey: .expectedTerminalIdentity)
         self.acceptedLiveOffsetSeconds = try container.decodeIfPresent([OffsetSeconds].self, forKey: .acceptedLiveOffsetSeconds) ?? []

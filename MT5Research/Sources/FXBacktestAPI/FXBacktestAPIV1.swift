@@ -4,6 +4,7 @@ public enum FXBacktestAPIV1 {
     public static let version = "fxexport.fxbacktest.history.v1"
     public static let statusPath = "/v1/status"
     public static let m1HistoryPath = "/v1/history/m1"
+    public static let executionSpecPath = "/v1/execution/spec"
     public static let maximumRowsLimit = 5_000_000
 }
 
@@ -252,6 +253,345 @@ public struct FXBacktestM1HistoryResponse: Codable, Equatable, Sendable {
                   low[index] <= close[index] else {
                 throw FXBacktestAPIValidationError.invalidField("OHLC invariant failed at index \(index)")
             }
+        }
+    }
+}
+
+public struct FXBacktestExecutionSpecRequest: Codable, Equatable, Sendable {
+    public let apiVersion: String
+    public let brokerSourceId: String
+    public let symbols: [FXBacktestExecutionSymbolRequest]
+
+    enum CodingKeys: String, CodingKey {
+        case apiVersion = "api_version"
+        case brokerSourceId = "broker_source_id"
+        case symbols
+    }
+
+    public init(
+        apiVersion: String = FXBacktestAPIV1.version,
+        brokerSourceId: String,
+        symbols: [FXBacktestExecutionSymbolRequest]
+    ) {
+        self.apiVersion = apiVersion
+        self.brokerSourceId = brokerSourceId
+        self.symbols = symbols
+    }
+
+    public func validate() throws {
+        guard apiVersion == FXBacktestAPIV1.version else {
+            throw FXBacktestAPIValidationError.unsupportedVersion(apiVersion)
+        }
+        guard !brokerSourceId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw FXBacktestAPIValidationError.invalidField("broker_source_id must not be empty")
+        }
+        guard !symbols.isEmpty else {
+            throw FXBacktestAPIValidationError.invalidField("symbols must not be empty")
+        }
+        guard symbols.count <= 256 else {
+            throw FXBacktestAPIValidationError.invalidField("symbols must not contain more than 256 items")
+        }
+        let logicalSymbols = symbols.map { $0.logicalSymbol.uppercased() }
+        guard Set(logicalSymbols).count == logicalSymbols.count else {
+            throw FXBacktestAPIValidationError.invalidField("symbols logical_symbol values must be unique")
+        }
+        for symbol in symbols {
+            try symbol.validate()
+        }
+    }
+}
+
+public struct FXBacktestExecutionSymbolRequest: Codable, Equatable, Sendable {
+    public let logicalSymbol: String
+    public let expectedMT5Symbol: String?
+    public let expectedDigits: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case logicalSymbol = "logical_symbol"
+        case expectedMT5Symbol = "expected_mt5_symbol"
+        case expectedDigits = "expected_digits"
+    }
+
+    public init(logicalSymbol: String, expectedMT5Symbol: String? = nil, expectedDigits: Int? = nil) {
+        self.logicalSymbol = logicalSymbol
+        self.expectedMT5Symbol = expectedMT5Symbol
+        self.expectedDigits = expectedDigits
+    }
+
+    public func validate() throws {
+        guard !logicalSymbol.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw FXBacktestAPIValidationError.invalidField("logical_symbol must not be empty")
+        }
+        if let expectedMT5Symbol {
+            guard !expectedMT5Symbol.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw FXBacktestAPIValidationError.invalidField("expected_mt5_symbol must not be empty when supplied")
+            }
+        }
+        if let expectedDigits {
+            guard (0...10).contains(expectedDigits) else {
+                throw FXBacktestAPIValidationError.invalidField("expected_digits must be between 0 and 10")
+            }
+        }
+    }
+}
+
+public struct FXBacktestExecutionSpecResponse: Codable, Equatable, Sendable {
+    public let apiVersion: String
+    public let brokerSourceId: String
+    public let capturedAtUtc: Int64
+    public let accountCurrency: String
+    public let accountLeverage: Double
+    public let accountMode: String
+    public let mt5AccountMarginMode: Int?
+    public let symbols: [FXBacktestExecutionSymbolSpec]
+
+    enum CodingKeys: String, CodingKey {
+        case apiVersion = "api_version"
+        case brokerSourceId = "broker_source_id"
+        case capturedAtUtc = "captured_at_utc"
+        case accountCurrency = "account_currency"
+        case accountLeverage = "account_leverage"
+        case accountMode = "account_mode"
+        case mt5AccountMarginMode = "mt5_account_margin_mode"
+        case symbols
+    }
+
+    public init(
+        apiVersion: String = FXBacktestAPIV1.version,
+        brokerSourceId: String,
+        capturedAtUtc: Int64,
+        accountCurrency: String,
+        accountLeverage: Double,
+        accountMode: String = "hedging",
+        mt5AccountMarginMode: Int? = nil,
+        symbols: [FXBacktestExecutionSymbolSpec]
+    ) {
+        self.apiVersion = apiVersion
+        self.brokerSourceId = brokerSourceId
+        self.capturedAtUtc = capturedAtUtc
+        self.accountCurrency = accountCurrency
+        self.accountLeverage = accountLeverage
+        self.accountMode = accountMode
+        self.mt5AccountMarginMode = mt5AccountMarginMode
+        self.symbols = symbols
+    }
+
+    public func validate() throws {
+        guard apiVersion == FXBacktestAPIV1.version else {
+            throw FXBacktestAPIValidationError.unsupportedVersion(apiVersion)
+        }
+        guard !brokerSourceId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw FXBacktestAPIValidationError.invalidField("broker_source_id must not be empty")
+        }
+        guard capturedAtUtc > 0 else {
+            throw FXBacktestAPIValidationError.invalidField("captured_at_utc must be positive")
+        }
+        guard !accountCurrency.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw FXBacktestAPIValidationError.invalidField("account_currency must not be empty")
+        }
+        guard accountLeverage.isFinite, accountLeverage > 0 else {
+            throw FXBacktestAPIValidationError.invalidField("account_leverage must be > 0")
+        }
+        guard accountMode == "hedging" else {
+            throw FXBacktestAPIValidationError.invalidField("account_mode must be hedging")
+        }
+        guard !symbols.isEmpty else {
+            throw FXBacktestAPIValidationError.invalidField("symbols must not be empty")
+        }
+        let logicalSymbols = symbols.map { $0.logicalSymbol.uppercased() }
+        guard Set(logicalSymbols).count == logicalSymbols.count else {
+            throw FXBacktestAPIValidationError.invalidField("symbols logical_symbol values must be unique")
+        }
+        for symbol in symbols {
+            try symbol.validate()
+        }
+    }
+}
+
+public struct FXBacktestExecutionSymbolSpec: Codable, Equatable, Sendable {
+    public let logicalSymbol: String
+    public let mt5Symbol: String
+    public let selected: Bool
+    public let digits: Int
+    public let bid: Double
+    public let ask: Double
+    public let point: Double
+    public let spreadPoints: Int
+    public let spreadFloat: Bool
+    public let contractSize: Double
+    public let volumeMin: Double
+    public let volumeStep: Double
+    public let volumeMax: Double
+    public let swapLongPerLot: Double
+    public let swapShortPerLot: Double
+    public let swapMode: Int
+    public let marginInitialPerLot: Double?
+    public let marginMaintenancePerLot: Double?
+    public let marginBuyPerLot: Double?
+    public let marginSellPerLot: Double?
+    public let marginCalcLots: Double
+    public let tradeCalcMode: Int
+    public let tradeMode: Int
+    public let tickSize: Double
+    public let tickValue: Double
+    public let tickValueProfit: Double?
+    public let tickValueLoss: Double?
+    public let commissionPerLotPerSide: Double?
+    public let commissionSource: String
+    public let slippagePoints: Int
+    public let slippageSource: String
+
+    enum CodingKeys: String, CodingKey {
+        case logicalSymbol = "logical_symbol"
+        case mt5Symbol = "mt5_symbol"
+        case selected
+        case digits
+        case bid
+        case ask
+        case point
+        case spreadPoints = "spread_points"
+        case spreadFloat = "spread_float"
+        case contractSize = "contract_size"
+        case volumeMin = "volume_min"
+        case volumeStep = "volume_step"
+        case volumeMax = "volume_max"
+        case swapLongPerLot = "swap_long_per_lot"
+        case swapShortPerLot = "swap_short_per_lot"
+        case swapMode = "swap_mode"
+        case marginInitialPerLot = "margin_initial_per_lot"
+        case marginMaintenancePerLot = "margin_maintenance_per_lot"
+        case marginBuyPerLot = "margin_buy_per_lot"
+        case marginSellPerLot = "margin_sell_per_lot"
+        case marginCalcLots = "margin_calc_lots"
+        case tradeCalcMode = "trade_calc_mode"
+        case tradeMode = "trade_mode"
+        case tickSize = "tick_size"
+        case tickValue = "tick_value"
+        case tickValueProfit = "tick_value_profit"
+        case tickValueLoss = "tick_value_loss"
+        case commissionPerLotPerSide = "commission_per_lot_per_side"
+        case commissionSource = "commission_source"
+        case slippagePoints = "slippage_points"
+        case slippageSource = "slippage_source"
+    }
+
+    public init(
+        logicalSymbol: String,
+        mt5Symbol: String,
+        selected: Bool,
+        digits: Int,
+        bid: Double,
+        ask: Double,
+        point: Double,
+        spreadPoints: Int,
+        spreadFloat: Bool,
+        contractSize: Double,
+        volumeMin: Double,
+        volumeStep: Double,
+        volumeMax: Double,
+        swapLongPerLot: Double,
+        swapShortPerLot: Double,
+        swapMode: Int,
+        marginInitialPerLot: Double?,
+        marginMaintenancePerLot: Double?,
+        marginBuyPerLot: Double?,
+        marginSellPerLot: Double?,
+        marginCalcLots: Double,
+        tradeCalcMode: Int,
+        tradeMode: Int,
+        tickSize: Double,
+        tickValue: Double,
+        tickValueProfit: Double?,
+        tickValueLoss: Double?,
+        commissionPerLotPerSide: Double?,
+        commissionSource: String,
+        slippagePoints: Int,
+        slippageSource: String
+    ) {
+        self.logicalSymbol = logicalSymbol
+        self.mt5Symbol = mt5Symbol
+        self.selected = selected
+        self.digits = digits
+        self.bid = bid
+        self.ask = ask
+        self.point = point
+        self.spreadPoints = spreadPoints
+        self.spreadFloat = spreadFloat
+        self.contractSize = contractSize
+        self.volumeMin = volumeMin
+        self.volumeStep = volumeStep
+        self.volumeMax = volumeMax
+        self.swapLongPerLot = swapLongPerLot
+        self.swapShortPerLot = swapShortPerLot
+        self.swapMode = swapMode
+        self.marginInitialPerLot = marginInitialPerLot
+        self.marginMaintenancePerLot = marginMaintenancePerLot
+        self.marginBuyPerLot = marginBuyPerLot
+        self.marginSellPerLot = marginSellPerLot
+        self.marginCalcLots = marginCalcLots
+        self.tradeCalcMode = tradeCalcMode
+        self.tradeMode = tradeMode
+        self.tickSize = tickSize
+        self.tickValue = tickValue
+        self.tickValueProfit = tickValueProfit
+        self.tickValueLoss = tickValueLoss
+        self.commissionPerLotPerSide = commissionPerLotPerSide
+        self.commissionSource = commissionSource
+        self.slippagePoints = slippagePoints
+        self.slippageSource = slippageSource
+    }
+
+    public func validate() throws {
+        guard !logicalSymbol.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw FXBacktestAPIValidationError.invalidField("logical_symbol must not be empty")
+        }
+        guard !mt5Symbol.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw FXBacktestAPIValidationError.invalidField("mt5_symbol must not be empty")
+        }
+        guard selected else {
+            throw FXBacktestAPIValidationError.invalidField("\(logicalSymbol) is not selected in MT5")
+        }
+        guard (0...10).contains(digits) else {
+            throw FXBacktestAPIValidationError.invalidField("\(logicalSymbol) digits must be between 0 and 10")
+        }
+        guard bid.isFinite, ask.isFinite, bid > 0, ask > 0, ask >= bid else {
+            throw FXBacktestAPIValidationError.invalidField("\(logicalSymbol) bid/ask values are invalid")
+        }
+        guard point.isFinite, point > 0 else {
+            throw FXBacktestAPIValidationError.invalidField("\(logicalSymbol) point must be > 0")
+        }
+        guard spreadPoints >= 0, contractSize.isFinite, contractSize > 0 else {
+            throw FXBacktestAPIValidationError.invalidField("\(logicalSymbol) spread/contract values are invalid")
+        }
+        guard volumeMin.isFinite, volumeStep.isFinite, volumeMax.isFinite,
+              volumeMin > 0, volumeStep > 0, volumeMax >= volumeMin else {
+            throw FXBacktestAPIValidationError.invalidField("\(logicalSymbol) volume constraints are invalid")
+        }
+        guard swapLongPerLot.isFinite, swapShortPerLot.isFinite else {
+            throw FXBacktestAPIValidationError.invalidField("\(logicalSymbol) swap values are invalid")
+        }
+        let optionalValues = [
+            marginInitialPerLot,
+            marginMaintenancePerLot,
+            marginBuyPerLot,
+            marginSellPerLot,
+            tickValueProfit,
+            tickValueLoss,
+            commissionPerLotPerSide
+        ]
+        guard optionalValues.allSatisfy({ $0 == nil || $0!.isFinite }) else {
+            throw FXBacktestAPIValidationError.invalidField("\(logicalSymbol) optional execution values must be finite when present")
+        }
+        guard marginCalcLots.isFinite, marginCalcLots > 0 else {
+            throw FXBacktestAPIValidationError.invalidField("\(logicalSymbol) margin_calc_lots must be > 0")
+        }
+        guard tickSize.isFinite, tickSize >= 0, tickValue.isFinite else {
+            throw FXBacktestAPIValidationError.invalidField("\(logicalSymbol) tick values are invalid")
+        }
+        guard !commissionSource.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              slippagePoints >= 0,
+              !slippageSource.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw FXBacktestAPIValidationError.invalidField("\(logicalSymbol) execution source fields are invalid")
         }
     }
 }

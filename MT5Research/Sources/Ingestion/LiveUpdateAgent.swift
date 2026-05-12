@@ -53,13 +53,23 @@ public struct LiveUpdateAgent: Sendable {
     }
 
     private func runOnce(terminalIdentity: BrokerServerIdentity) async throws {
+        let liveSnapshot = try bridge.serverTimeSnapshot()
+        try await BrokerOffsetAutoAuthority(
+            clickHouse: clickHouse,
+            database: config.clickHouse.database,
+            logger: logger
+        ).ensureLiveSegmentIfMissing(
+            brokerSourceId: config.brokerTime.brokerSourceId,
+            terminalIdentity: terminalIdentity,
+            snapshot: liveSnapshot
+        )
         let offsetMap = try await offsetStore.loadVerifiedOffsetMap(
             brokerSourceId: config.brokerTime.brokerSourceId,
             terminalIdentity: terminalIdentity
         )
         let offsetAuthoritySHA256 = offsetMap.authoritySHA256()
         try BrokerOffsetRuntimeVerifier().verify(
-            snapshot: bridge.serverTimeSnapshot(),
+            snapshot: liveSnapshot,
             offsetMap: offsetMap,
             acceptedLiveOffsetSeconds: config.brokerTime.acceptedLiveOffsetSeconds,
             logger: logger

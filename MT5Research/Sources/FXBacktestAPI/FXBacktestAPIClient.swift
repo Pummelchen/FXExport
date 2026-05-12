@@ -36,6 +36,19 @@ public struct FXBacktestAPIClient: Sendable {
         return response
     }
 
+    public func loadExecutionSpec(_ specRequest: FXBacktestExecutionSpecRequest) async throws -> FXBacktestExecutionSpecResponse {
+        try specRequest.validate()
+        var request = URLRequest(url: try endpoint(FXBacktestAPIV1.executionSpecPath))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.httpBody = try Self.makeEncoder().encode(specRequest)
+        let data = try await perform(request)
+        let response = try JSONDecoder().decode(FXBacktestExecutionSpecResponse.self, from: data)
+        try response.validate()
+        return response
+    }
+
     private func endpoint(_ path: String) throws -> URL {
         guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
             throw FXBacktestAPIClientError.invalidBaseURL(baseURL.absoluteString)

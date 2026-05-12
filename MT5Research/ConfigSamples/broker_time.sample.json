@@ -1,9 +1,0 @@
-{
-  "broker_source_id": "icmarkets-sc-mt5-4",
-  "accepted_live_offset_seconds": [7200, 10800],
-  "expected_terminal_identity": {
-    "company": null,
-    "server": "ICMarketsSC-MT5-4",
-    "account_login": null
-  }
-}

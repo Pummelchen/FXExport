@@ -27,11 +27,15 @@ public struct VerificationAgent: Sendable {
         }
         var integrityIssues: [String] = []
 
+        let brokerWhere = config.brokerTime.isAutomatic
+            ? "1 = 1"
+            : "broker_source_id = '\(sqlLiteral(config.brokerTime.brokerSourceId.rawValue))'"
+
         logger.verify("Running duplicate-key check")
         let duplicateRows = try await clickHouse.execute(.select("""
         SELECT broker_source_id, logical_symbol, ts_utc, count()
         FROM \(config.clickHouse.database).ohlc_m1_canonical
-        WHERE broker_source_id = '\(sqlLiteral(config.brokerTime.brokerSourceId.rawValue))'
+        WHERE \(brokerWhere)
         GROUP BY broker_source_id, logical_symbol, ts_utc
         HAVING count() > 1
         LIMIT 20
@@ -47,7 +51,7 @@ public struct VerificationAgent: Sendable {
         let invariantCount = try await clickHouse.execute(.select("""
         SELECT count()
         FROM \(config.clickHouse.database).ohlc_m1_canonical
-        WHERE broker_source_id = '\(sqlLiteral(config.brokerTime.brokerSourceId.rawValue))'
+        WHERE \(brokerWhere)
           AND (open_scaled <= 0 OR high_scaled < open_scaled OR high_scaled < close_scaled OR high_scaled < low_scaled OR low_scaled > open_scaled OR low_scaled > close_scaled)
         FORMAT TabSeparated
         """))
@@ -61,7 +65,7 @@ public struct VerificationAgent: Sendable {
         let unverifiedCount = try await clickHouse.execute(.select("""
         SELECT count()
         FROM \(config.clickHouse.database).ohlc_m1_canonical
-        WHERE broker_source_id = '\(sqlLiteral(config.brokerTime.brokerSourceId.rawValue))'
+        WHERE \(brokerWhere)
           AND offset_confidence != 'verified'
         FORMAT TabSeparated
         """))
@@ -77,7 +81,7 @@ public struct VerificationAgent: Sendable {
         FROM (
             SELECT operation_type, batch_id, argMax(status, tuple(event_at_utc, status_rank)) AS latest_status
             FROM \(config.clickHouse.database).ingest_operations
-            WHERE broker_source_id = '\(sqlLiteral(config.brokerTime.brokerSourceId.rawValue))'
+            WHERE \(brokerWhere)
             GROUP BY operation_type, batch_id
         )
         WHERE NOT (

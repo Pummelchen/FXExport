@@ -130,4 +130,8 @@ public final class MT5BridgeClient: @unchecked Sendable {
     public func serverTimeSnapshot() throws -> ServerTimeSnapshotDTO {
         try request(command: .getServerTimeSnapshot, payload: EmptyPayload(), responseType: ServerTimeSnapshotDTO.self)
     }
+
+    public func close() {
+        connection.close()
+    }
 }

@@ -26,7 +26,7 @@ public struct TerminalIdentityPolicy: Sendable {
     ) throws -> BrokerServerIdentity {
         let identity = try actual.brokerServerIdentity()
         guard let expected, !expected.isEmpty else {
-            logger.warn("No expected MT5 terminal identity configured for broker_source_id \(brokerSourceId.rawValue); using actual terminal identity \(identity) for DB-backed offset lookup")
+            logger.ok("MT5 terminal identity auto-detected for broker_source_id \(brokerSourceId.rawValue): \(identity)")
             return identity
         }
         if let company = expected.company, company != actual.company {

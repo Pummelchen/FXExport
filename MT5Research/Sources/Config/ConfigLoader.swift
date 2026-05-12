@@ -22,6 +22,16 @@ public struct ConfigBundle: Sendable {
         self.brokerTime = brokerTime
         self.symbols = symbols
     }
+
+    public func resolvingBrokerSourceId(_ brokerSourceId: BrokerSourceId) -> ConfigBundle {
+        ConfigBundle(
+            app: app,
+            clickHouse: clickHouse,
+            mt5Bridge: mt5Bridge,
+            brokerTime: brokerTime.resolving(brokerSourceId: brokerSourceId),
+            symbols: symbols
+        )
+    }
 }
 
 public enum ConfigError: Error, CustomStringConvertible, Sendable {
@@ -54,7 +64,7 @@ public struct ConfigLoader: Sendable {
         let app: AppConfigFile = try load("app.json", from: configDirectory)
         let clickHouse: ClickHouseConfig = try load("clickhouse.json", from: configDirectory)
         let mt5Bridge: MT5BridgeConfig = try load("mt5_bridge.json", from: configDirectory)
-        let brokerTime: BrokerTimeConfig = try load("broker_time.json", from: configDirectory)
+        let brokerTime = try BrokerTimeConfig.automatic()
         let symbols: SymbolConfig = try load("symbols.json", from: configDirectory)
         try validate(app: app, clickHouse: clickHouse, mt5Bridge: mt5Bridge, brokerTime: brokerTime, symbols: symbols)
         return ConfigBundle(app: app, clickHouse: clickHouse, mt5Bridge: mt5Bridge, brokerTime: brokerTime, symbols: symbols)
@@ -109,6 +119,21 @@ public struct ConfigLoader: Sendable {
         }
         if clickHouse.usesInsecureRemoteHTTP && !clickHouse.allowInsecureRemoteHTTP {
             throw ConfigError.invalidValue("Remote ClickHouse endpoints must use https. Set allowInsecureRemoteHTTP only for an explicitly accepted private tunnel.")
+        }
+        if !clickHouse.isLocalEndpoint,
+           clickHouse.password != nil,
+           clickHouse.passwordEnvironmentVariable == nil,
+           !clickHouse.allowPlaintextRemotePassword {
+            throw ConfigError.invalidValue("Remote ClickHouse plaintext passwords in config are disabled. Use passwordEnvironmentVariable or explicitly set allowPlaintextRemotePassword for a private deployment.")
+        }
+        if let env = clickHouse.passwordEnvironmentVariable {
+            guard Self.isSafeEnvironmentVariableName(env) else {
+                throw ConfigError.invalidValue("ClickHouse passwordEnvironmentVariable must be a valid environment variable name")
+            }
+            guard let value = ProcessInfo.processInfo.environment[env],
+                  !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw ConfigError.invalidValue("ClickHouse passwordEnvironmentVariable \(env) is configured, but the environment variable is not set")
+            }
         }
         guard !clickHouse.queryIdPrefix.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw ConfigError.invalidValue("ClickHouse queryIdPrefix must not be empty")
@@ -214,6 +239,19 @@ public struct ConfigLoader: Sendable {
             (byte >= 97 && byte <= 122) ||
             byte == 45 ||
             byte == 95
+        }
+    }
+
+    private static func isSafeEnvironmentVariableName(_ value: String) -> Bool {
+        guard let first = value.utf8.first,
+              (first == 95 || (first >= 65 && first <= 90) || (first >= 97 && first <= 122)) else {
+            return false
+        }
+        return value.utf8.allSatisfy { byte in
+            byte == 95 ||
+            (byte >= 48 && byte <= 57) ||
+            (byte >= 65 && byte <= 90) ||
+            (byte >= 97 && byte <= 122)
         }
     }
 

@@ -17,9 +17,29 @@ struct BrokerAuthority: Sendable {
     }
 
     func verifiedOffsetMap(context: AgentRuntimeContext, bridge: MT5BridgeClient) async throws -> BrokerOffsetMap {
-        let identity = try terminalIdentity(context: context, bridge: bridge)
+        let terminal = try bridge.terminalInfo()
+        let resolved = try await BrokerSourceRegistry(
+            client: context.clickHouse,
+            database: context.config.clickHouse.database
+        ).resolve(terminalInfo: terminal)
+        let brokerSourceId = context.config.brokerTime.isAutomatic ? resolved.brokerSourceId : context.config.brokerTime.brokerSourceId
+        let identity = try TerminalIdentityPolicy().resolve(
+            actual: terminal,
+            brokerSourceId: brokerSourceId,
+            expected: context.config.brokerTime.expectedTerminalIdentity,
+            logger: context.logger
+        )
+        try await BrokerOffsetAutoAuthority(
+            clickHouse: context.clickHouse,
+            database: context.config.clickHouse.database,
+            logger: context.logger
+        ).ensureLiveSegmentIfMissing(
+            brokerSourceId: brokerSourceId,
+            terminalIdentity: identity,
+            snapshot: bridge.serverTimeSnapshot()
+        )
         return try await context.offsetStore().loadVerifiedOffsetMap(
-            brokerSourceId: context.config.brokerTime.brokerSourceId,
+            brokerSourceId: brokerSourceId,
             terminalIdentity: identity
         )
     }

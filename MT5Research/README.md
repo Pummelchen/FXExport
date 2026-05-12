@@ -153,14 +153,13 @@ mkdir -p Config
 cp ConfigSamples/app.sample.json Config/app.json
 cp ConfigSamples/clickhouse.sample.json Config/clickhouse.json
 cp ConfigSamples/mt5_bridge.sample.json Config/mt5_bridge.json
-cp ConfigSamples/broker_time.sample.json Config/broker_time.json
 cp ConfigSamples/symbols.sample.json Config/symbols.json
 cp ConfigSamples/history_data.sample.json Config/history_data.json
 ```
 
-Edit every file before production use.
+Edit the local files before production use. There is intentionally no `broker_time.json`; FXExport discovers the connected MT5 company/server/account through the EA and registers the broker source in ClickHouse.
 
-ClickHouse credentials belong only in local ignored files under `Config/`. The Swift HTTP client sends credentials with an HTTP Basic Authorization header and does not put the password into the request URL.
+ClickHouse credentials belong only in local ignored files under `Config/`. The Swift HTTP client sends credentials with an HTTP Basic Authorization header and does not put the password into the request URL. For remote ClickHouse, prefer `passwordEnvironmentVariable` so the password is supplied by the process environment instead of a config file; plaintext remote passwords are rejected unless `allowPlaintextRemotePassword` is explicitly enabled.
 
 ### Persistent Logs And Alerts
 
@@ -192,7 +191,7 @@ The program does not guess suffixes or prefixes. If your broker uses `EURUSDm`, 
 
 MT5 historical bar timestamps are broker/server time, not automatically UTC.
 
-`Config/broker_time.json` identifies the configured `broker_source_id` and can optionally pin the expected MT5 terminal identity. It does not provide canonical UTC authority.
+FXExport no longer uses a local `Config/broker_time.json`. On MT5-backed commands, Swift asks the EA for terminal identity, derives a stable `broker_source_id` such as `icmarkets-sc-mt5-4-account-12345678`, and records the identity in ClickHouse table `broker_sources`. If an identity already maps to exactly one active broker source, that ID is reused; ambiguous identity rows stop the command.
 
 Canonical UTC conversion loads active, verified offset segments from ClickHouse table `broker_time_offsets`, filtered by:
 
@@ -202,6 +201,8 @@ Canonical UTC conversion loads active, verified offset segments from ClickHouse 
 - `mt5_account_login`
 - `confidence = 'verified'`
 - `is_active = 1`
+
+For the current live MT5 server day, FXExport can automatically record a verified offset segment from the EA's `GET_SERVER_TIME_SNAPSHOT` when no verified segment covers the live server timestamp. This is intentionally limited to the live day. Historical DST/server-time segments are never guessed; full backfill still requires audited `broker_time_offsets` coverage for every historical MT5 server-time range. For known IC Markets MT5 servers, the code accepts only `7200` and `10800` second live offsets.
 
 UTC conversion is:
 
@@ -222,7 +223,7 @@ INSERT INTO fxexport.broker_time_offsets
 )
 VALUES
 (
-  'icmarkets-sc-mt5-4', 'REPLACE_WITH_BRIDGE_CHECK_COMPANY', 'ICMarketsSC-MT5-4', 12345678,
+  'icmarkets-sc-mt5-4-account-12345678', 'REPLACE_WITH_BRIDGE_CHECK_COMPANY', 'ICMarketsSC-MT5-4', 12345678,
   1672531200, 1688169600, 7200,
   'manual', 'verified', 'Verified against broker server/GMT snapshot and known DST schedule', 1, 1700000000
 );
@@ -230,19 +231,7 @@ VALUES
 
 This strictness is intentional. Brokers can change server timezone policy, daylight-saving behavior, server names, or account routing. A broad inferred offset is useful for planning but is not safe enough for canonical backtesting data.
 
-`expected_terminal_identity` can bind a config to a specific MT5 company/server/account:
-
-```json
-"expected_terminal_identity": {
-  "company": "Broker Ltd",
-  "server": "Broker-Server",
-  "account_login": 12345678
-}
-```
-
-For IC Markets server `ICMarketsSC-MT5-4`, the sample config uses `broker_source_id = "icmarkets-sc-mt5-4"`, pins the expected server name, and accepts only live offsets `7200` and `10800` seconds. IC Markets documents that its MT4/MT5 server time is GMT+2 or GMT+3 when daylight saving is in effect ([trading hours](https://www.icmarkets.com/global/en/trading-pricing/trading-hours/)), and its 2026 notice says the server changed from GMT+2 to GMT+3 on 2026-03-08 ([2026 server time notice](https://www.icmarkets.com.au/blog/us-daylight-savings-server-time-changing-to-gmt3-2026/)).
-
-If `expected_terminal_identity` values are provided, `bridge-check`, `backfill`, `live`, `verify`, and `repair` verify the connected terminal before using DB-backed offset authority. Even when optional fields are omitted, the actual MT5 terminal identity is still used for the DB-backed offset lookup.
+For IC Markets server `ICMarketsSC-MT5-4`, the automatic broker source id is `icmarkets-sc-mt5-4-account-12345678`; code-owned live-offset policy accepts only `7200` and `10800` seconds for IC Markets MT5 servers. IC Markets documents that its MT4/MT5 server time is GMT+2 or GMT+3 when daylight saving is in effect ([trading hours](https://www.icmarkets.com/global/en/trading-pricing/trading-hours/)), and its 2026 notice says the server changed from GMT+2 to GMT+3 on 2026-03-08 ([2026 server time notice](https://www.icmarkets.com.au/blog/us-daylight-savings-server-time-changing-to-gmt3-2026/)).
 
 ## ClickHouse Migrations
 
@@ -257,6 +246,7 @@ This creates:
 - `mt5_ohlc_m1_raw`
 - `ohlc_m1_canonical`
 - `ohlc_m1_conflicts`
+- `broker_sources`
 - `broker_time_offsets`
 - `ingest_state`
 - `ingest_operations`
@@ -265,6 +255,7 @@ This creates:
 - `repair_log`
 - `runtime_agent_events`
 - `runtime_agent_state`
+- `data_certificates`
 
 Raw audit data is append-only. Repairs only target canonical data and must preserve conflicts, repair logs, ingest operation history, and verified coverage records.
 
@@ -272,7 +263,7 @@ Raw audit data is append-only. Repairs only target canonical data and must prese
 
 FXExport uses ClickHouse's HTTP interface from Swift. This is intentional for now: the correctness guarantees come from typed validation, deterministic batch stages, canonical readback, SHA-256 chunk evidence, and checkpoint ordering, not from the wire protocol alone. For a centralized remote ClickHouse server, configure HTTPS. Plain `http://` is allowed by default only for `localhost`, `127.0.0.1`, or `::1`. A remote `http://` endpoint is rejected unless `allowInsecureRemoteHTTP` is explicitly set for a private tunnel you already trust.
 
-The HTTP client sends SQL by POST, reads the full response body, parses ClickHouse exceptions in the body, uses `wait_end_of_query=1`, adds a per-attempt `query_id`, and never retries non-idempotent writes. Credentials must be in `username` and `password` fields, not embedded in the URL.
+The HTTP client sends SQL by POST, reads the full response body, parses ClickHouse exceptions in the body, uses `wait_end_of_query=1`, adds a per-attempt `query_id`, and never retries non-idempotent writes. Credentials must be in `username` plus either `password` or `passwordEnvironmentVariable`, not embedded in the URL. Remote deployments should use HTTPS plus `passwordEnvironmentVariable`; a remote plaintext password in config is rejected unless explicitly allowed for a private deployment.
 
 Canonical ingestion is replace-by-range for the affected broker/source/symbol range. Swift first asks the EA for a manifest-backed MT5 range, reads it twice, and only accepts it when the source hash, row count, first/last timestamps, closed-bar boundary, and history synchronization metadata are stable. Every accepted chunk now also carries SHA-256 evidence: the semantic MT5 source response, the verified broker-offset authority snapshot, and the canonical ClickHouse readback digest after insert. Before replacing a canonical range, Swift reads existing canonical rows for the same UTC identities and writes `ohlc_m1_conflicts` rows for any differing OHLC/hash values. The delete predicate then covers both the raw MT5 server-time envelope and the converted UTC identity range before reinserting verified rows. After the replacement insert, Swift reads the full requested MT5 server-time envelope back from ClickHouse and verifies row count, unique MT5 and UTC timestamp counts, single MT5 symbol/timeframe/digits identity, zero non-verified UTC offset rows, the exact MT5 timestamp/UTC/OHLC/digits/hash sequence, and matching canonical SHA-256 before advancing the checkpoint. Each chunk writes an `ingest_operations` trail and then a SHA-256-backed verified coverage certificate split at broker UTC-offset segment boundaries, so DST/server-offset changes cannot over-certify UTC coverage. This prevents duplicate canonical bars after a crash between insert and checkpoint update, catches older rows written under a wrong UTC mapping, blocks consumers after unfinished or non-SHA-protected writes, and preserves conflicting canonical versions for audit. Raw audit rows remain append-only.
 
@@ -443,12 +434,13 @@ Required fresh OK agent state before history data is considered safe for externa
 | `live_m1_updater` | max(120s, 6x live scan interval) | Confirms closed-M1 ingestion is currently healthy. |
 | `database_verifier_repairer` | max(7200s, 2x verifier interval) | Confirms DB integrity and MT5 random checks are clean according to config. |
 | `checkpoint_gap_auditor` | max(900s, 3x checkpoint audit interval) | Confirms every configured symbol has a live checkpoint, checkpoint MT5 symbols still match config, checkpoint/canonical rows are consistent, and live lag is acceptable. |
+| `data_certification` | max(7200s, 2x backup interval) | Confirms verified coverage has SHA-256 data certificates for downstream audit/export safety. |
 
 This means a freshly loaded database is not considered safe for external backtests until the supervisor has run the safety agents successfully. If a first import was interrupted, `ingest_state.status` remains `backfilling` or `ingest_operations` contains a non-terminal batch, so history-data reads for backtesting stay blocked until backfill is rerun, all deterministic batches are terminal, and all configured symbols reach `live`.
 
 ## FXBacktest API v1
 
-FXBacktest reads historical M1 OHLC data only through the dedicated FXBacktest API v1. The API server runs inside FXExport, so FXExport remains the only process that knows ClickHouse credentials, database names, canonical table layout, readiness gates, and repair/verification rules.
+FXBacktest reads historical M1 OHLC data and pre-run MT5 execution snapshots only through the dedicated FXBacktest API v1. The API server runs inside FXExport, so FXExport remains the only process that knows ClickHouse credentials, database names, canonical table layout, readiness gates, repair/verification rules, and MT5 EA bridge details.
 
 Start the API from the resident FXExport prompt:
 
@@ -471,6 +463,7 @@ API identity:
 | Version | `fxexport.fxbacktest.history.v1` |
 | Status | `GET /v1/status` |
 | M1 history | `POST /v1/history/m1` |
+| Execution snapshot | `POST /v1/execution/spec` |
 | Transport | Local HTTP, default `http://127.0.0.1:5066` |
 
 Example history request:
@@ -478,7 +471,7 @@ Example history request:
 ```json
 {
   "api_version": "fxexport.fxbacktest.history.v1",
-  "broker_source_id": "icmarkets-sc-mt5-4",
+  "broker_source_id": "icmarkets-sc-mt5-4-account-12345678",
   "logical_symbol": "EURUSD",
   "utc_start_inclusive": 1577836800,
   "utc_end_exclusive": 1735689600,
@@ -494,7 +487,7 @@ Example history response shape:
 {
   "api_version": "fxexport.fxbacktest.history.v1",
   "metadata": {
-    "broker_source_id": "icmarkets-sc-mt5-4",
+    "broker_source_id": "icmarkets-sc-mt5-4-account-12345678",
     "logical_symbol": "EURUSD",
     "mt5_symbol": "EURUSD",
     "timeframe": "M1",
@@ -515,11 +508,25 @@ Example history response shape:
 
 All OHLC arrays use scaled integer prices. The request validator rejects `maximum_rows` values above 5,000,000 so clients must split larger ranges. The response validator rejects mismatched column lengths, non-M1 metadata, non-minute timestamps, timestamps outside the requested range, unsorted timestamps, invalid OHLC invariants, and mismatched first/last metadata.
 
+Before a non-demo FXBacktest run starts, FXBacktest calls `POST /v1/execution/spec` with the broker source and each loaded logical symbol. FXExport queries the live MT5 terminal through the EA bridge and returns bid/ask, spread, floating-spread flag, contract size, min/step/max lots, swap fields, margin estimates from `OrderCalcMargin`, tick values, trade mode, account currency, and leverage. The API response always marks the FXBacktest account model as `hedging`.
+
+MT5 does not expose a reliable static symbol commission or Strategy Tester slippage model through `SymbolInfo*`, so the execution snapshot carries source fields. Current defaults are `commission_per_lot_per_side = null` with source `not_exposed_by_mt5_symbol_info`, and `slippage_points = 0` with source `deterministic_zero_default`.
+
 Server-side loading still uses FXExport's internal read-only ClickHouse-backed provider after the readiness gate passes. That internal provider is not a supported integration surface for FXBacktest. This prevents direct DB shortcuts and keeps API v1 as the single versioned contract between the projects.
+
+## Operational Health API
+
+For external monitoring, start the lightweight read-only health API from the resident prompt:
+
+```text
+> health-api --api-host 127.0.0.1 --api-port 5067
+```
+
+It serves `GET /v1/health` with ClickHouse reachability, broker source count, canonical row count, unfinished ingest operation count, warning/failed agent counts, valid data certificate count, and latest canonical UTC. This endpoint is operational status only; it does not serve OHLC data.
 
 ## Production Supervisor Agents
 
-`supervise` runs ten operational agents through one sequential supervisor. The supervisor owns the single MT5 bridge connection, uses the same broker runtime lock as standalone writer commands, records agent events in ClickHouse, and keeps retryable failures from advancing ingestion checkpoints.
+`supervise` runs eleven operational agents through one sequential supervisor. The supervisor owns the single MT5 bridge connection, uses the same broker runtime lock as standalone writer commands, records agent events in ClickHouse, and keeps retryable failures from advancing ingestion checkpoints.
 
 The supervisor sorts due agents by explicit priority before every cycle:
 
@@ -533,6 +540,7 @@ The supervisor sorts due agents by explicit priority before every cycle:
 | 60 | `live_m1_updater` | 10s | Ingests newly closed M1 bars. |
 | 70 | `database_verifier_repairer` | 3600s | Runs DB checks, MT5 random cross-checks, and safe canonical repair. |
 | 80 | `checkpoint_gap_auditor` | 300s | Checks missing checkpoints, non-live ingest states, MT5 symbol mapping drift, checkpoint/canonical consistency, and live lag. |
+| 85 | `data_certification` | 3600s | Creates SHA-256 data certificates from verified coverage and canonical readback evidence. |
 | 90 | `backup_readiness` | 3600s | Verifies canonical data exists for the configured broker before backup/export workflows. |
 | 100 | `alerting` | 30s | Raises persistent alerts for runtime failures, stale safety agents, verifier/repair blockers, MT5 bridge outages, and disk pressure. |
 
@@ -555,13 +563,15 @@ Implemented:
 - ANSI terminal logger with black-background color output, `NO_COLOR` support, and per-agent supervisor status lines.
 - Persistent JSONL log and alert files with size-based rotation.
 - JSON config loading.
-- DB-backed verified broker offset authority and explicit UTC conversion.
+- Automatic MT5 broker source discovery, DB-backed verified broker offset authority, live-day offset auto-observation, and explicit UTC conversion.
 - M1 OHLC validation.
 - Deterministic framed JSON protocol.
 - TCP socket transport in Swift with separate connect/accept timeout and request read/write timeout.
 - ClickHouse HTTP client and migrations.
 - Backfill/live update agents with MT5 history synchronization checks, double-read source completeness proofs, conflict recording, verified coverage certificates, checkpoint-after-canonical-readback flow, and canonical range replacement.
-- Production supervisor with ten operational agents, priority/supersedence rules, broker runtime lock, and runtime event/state tables.
+- Production supervisor with eleven operational agents, priority/supersedence rules, broker runtime lock, and runtime event/state tables.
+- SHA-256 data certification agent and `data_certificates` table for verified coverage audit evidence.
+- Read-only operational health API at `/v1/health`.
 - Operational failure guide command with action-oriented recovery advice for unattended operation.
 - Alerting agent checks for failed/stale safety agents, MT5 bridge outage state, ClickHouse/local disk pressure, unresolved verification mismatches, and failed repair outcomes. Heavy canonical duplicate/OHLC/offset scans stay owned by the verifier agent instead of running every alert cycle.
 - Resilient live updater that reconnects the MT5 bridge and retries local ClickHouse recovery with backoff without advancing checkpoints on failed batches.

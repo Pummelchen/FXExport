@@ -28,6 +28,7 @@ public final class FXBacktestAPIServer: @unchecked Sendable {
         defer { Darwin.close(serverFD) }
         logger.ok("FXBacktest API v1 listening at http://\(host):\(port)")
         logger.info("FXBacktest history endpoint: POST /v1/history/m1")
+        logger.info("FXBacktest execution endpoint: POST /v1/execution/spec")
 
         while !Task.isCancelled {
             var pollFD = pollfd(fd: serverFD, events: Int16(POLLIN), revents: 0)

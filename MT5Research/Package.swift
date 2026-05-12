@@ -24,7 +24,7 @@ let package = Package(
         .target(name: "MetalAccel", dependencies: ["Domain", "BacktestCore"]),
         .target(name: "Operations", dependencies: ["Domain", "AppCore", "Config", "MT5Bridge", "ClickHouse", "TimeMapping", "Validation", "Ingestion", "Verification"]),
         .target(name: "FXBacktestAPI"),
-        .target(name: "FXBacktestAPIServer", dependencies: ["FXBacktestAPI", "AppCore", "BacktestCore", "ClickHouse", "Config", "Domain", "Operations"]),
+        .target(name: "FXBacktestAPIServer", dependencies: ["FXBacktestAPI", "AppCore", "BacktestCore", "ClickHouse", "Config", "Domain", "Ingestion", "MT5Bridge", "Operations"]),
         .executableTarget(
             name: "MT5ResearchCLI",
             dependencies: ["AppCore", "Config", "MT5Bridge", "ClickHouse", "Ingestion", "Verification", "BacktestCore", "MetalAccel", "TimeMapping", "Operations", "FXBacktestAPIServer"]

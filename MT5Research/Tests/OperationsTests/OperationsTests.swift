@@ -89,12 +89,6 @@ final class OperationsTests: XCTestCase {
         """, name: "mt5_bridge.json", directory: directory)
         try writeConfig("""
         {
-          "broker_source_id": "demo",
-          "accepted_live_offset_seconds": [7200, 10800]
-        }
-        """, name: "broker_time.json", directory: directory)
-        try writeConfig("""
-        {
           "symbols": [
             { "logical_symbol": "EURUSD", "mt5_symbol": "EURUSD", "digits": 5 }
           ]
@@ -104,6 +98,8 @@ final class OperationsTests: XCTestCase {
         let bundle = try ConfigLoader().loadBundle(configDirectory: directory)
 
         XCTAssertFalse(bundle.app.logging.fileLoggingEnabled)
+        XCTAssertTrue(bundle.brokerTime.isAutomatic)
+        XCTAssertEqual(bundle.brokerTime.brokerSourceId.rawValue, "auto")
     }
 
     func testConfigLoaderRejectsInsecureRemoteClickHouseHTTPByDefault() throws {
@@ -750,8 +746,71 @@ final class OperationsTests: XCTestCase {
         _ = try await agent.run(context: context, startedAt: Date(timeIntervalSince1970: 1))
 
         let queries = await clickHouse.queries
-        XCTAssertEqual(queries.count, 1)
+        XCTAssertEqual(queries.count, 2)
         XCTAssertTrue(queries[0].sql.contains("WHERE broker_source_id = 'demo'"))
+        XCTAssertTrue(queries[1].sql.contains("FROM db.data_certificates"))
+        XCTAssertTrue(queries[1].sql.contains("WHERE broker_source_id = 'demo'"))
+    }
+
+    func testDataCertificateRejectsPartialVerifiedCoverage() async throws {
+        let clickHouse = DataCertificateClickHouse(rows: [
+            coverageRow(utcStart: 60, utcEnd: 120)
+        ])
+        let store = DataCertificateStore(clickHouse: clickHouse, database: "db")
+
+        await XCTAssertThrowsErrorAsync(try await store.certify(
+            brokerSourceId: try BrokerSourceId("demo"),
+            logicalSymbol: try LogicalSymbol("EURUSD"),
+            utcStart: UtcSecond(rawValue: 60),
+            utcEndExclusive: UtcSecond(rawValue: 180)
+        )) { error in
+            guard case DataCertificateError.incompleteVerifiedCoverage = error else {
+                XCTFail("Expected incompleteVerifiedCoverage, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testDataCertificateRequiresMatchingSourceAndCanonicalCounts() async throws {
+        let clickHouse = DataCertificateClickHouse(rows: [
+            coverageRow(utcStart: 60, utcEnd: 120, sourceCount: 1, canonicalCount: 0)
+        ])
+        let store = DataCertificateStore(clickHouse: clickHouse, database: "db")
+
+        await XCTAssertThrowsErrorAsync(try await store.certify(
+            brokerSourceId: try BrokerSourceId("demo"),
+            logicalSymbol: try LogicalSymbol("EURUSD"),
+            utcStart: UtcSecond(rawValue: 60),
+            utcEndExclusive: UtcSecond(rawValue: 120)
+        )) { error in
+            guard case DataCertificateError.inconsistentCoverageCounts = error else {
+                XCTFail("Expected inconsistentCoverageCounts, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testDataCertificateCreatesForContiguousVerifiedCoverage() async throws {
+        let clickHouse = DataCertificateClickHouse(rows: [
+            coverageRow(utcStart: 60, utcEnd: 120),
+            coverageRow(utcStart: 120, utcEnd: 180)
+        ])
+        let store = DataCertificateStore(clickHouse: clickHouse, database: "db")
+
+        let certificate = try await store.certify(
+            brokerSourceId: try BrokerSourceId("demo"),
+            logicalSymbol: try LogicalSymbol("EURUSD"),
+            utcStart: UtcSecond(rawValue: 60),
+            utcEndExclusive: UtcSecond(rawValue: 180),
+            createdAtUtc: UtcSecond(rawValue: 1_000)
+        )
+
+        XCTAssertEqual(certificate.coverageRowCount, 2)
+        XCTAssertEqual(certificate.coverageSourceBarCount, 2)
+        XCTAssertEqual(certificate.coverageCanonicalRowCount, 2)
+        let queries = await clickHouse.queries
+        XCTAssertEqual(queries.count, 2)
+        XCTAssertTrue(queries[1].sql.contains("INSERT INTO db.data_certificates"))
     }
 }
 
@@ -825,6 +884,7 @@ private actor BacktestGateClickHouse: ClickHouseClientProtocol {
             live_m1_updater\t\(now)
             database_verifier_repairer\t\(now)
             checkpoint_gap_auditor\t\(now)
+            data_certification\t\(now)
 
             """
         }
@@ -878,6 +938,49 @@ private actor BackupReadinessClickHouse: ClickHouseClientProtocol {
         queries.append(query)
         return "1\t60\t120\n"
     }
+}
+
+private actor DataCertificateClickHouse: ClickHouseClientProtocol {
+    private let rows: [String]
+    private(set) var queries: [ClickHouseQuery] = []
+
+    init(rows: [String]) {
+        self.rows = rows
+    }
+
+    func execute(_ query: ClickHouseQuery) async throws -> String {
+        queries.append(query)
+        if query.sql.contains("FROM db.ohlc_m1_verified_coverage") {
+            return rows.joined(separator: "\n") + "\n"
+        }
+        return ""
+    }
+}
+
+private func coverageRow(
+    utcStart: Int64,
+    utcEnd: Int64,
+    sourceCount: UInt32 = 1,
+    canonicalCount: UInt32 = 1
+) -> String {
+    let hashA = String(repeating: "a", count: 64)
+    let hashB = String(repeating: "b", count: 64)
+    let hashC = String(repeating: "c", count: 64)
+    return [
+        "EURUSD",
+        "M1",
+        String(utcStart),
+        String(utcEnd),
+        String(utcStart),
+        String(utcEnd),
+        String(sourceCount),
+        String(canonicalCount),
+        hashA,
+        hashB,
+        hashC,
+        "batch-\(utcStart)",
+        "1000"
+    ].joined(separator: "\t")
 }
 
 private actor AlertingClickHouse: ClickHouseClientProtocol {
@@ -1021,12 +1124,6 @@ private func writeMinimalConfigFiles(directory: URL, clickHouseJSON: String) thr
       "requestTimeoutSeconds": 10
     }
     """, name: "mt5_bridge.json", directory: directory)
-    try writeConfig("""
-    {
-      "broker_source_id": "demo",
-      "accepted_live_offset_seconds": [7200, 10800]
-    }
-    """, name: "broker_time.json", directory: directory)
     try writeConfig("""
     {
       "symbols": [

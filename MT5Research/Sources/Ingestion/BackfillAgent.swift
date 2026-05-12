@@ -81,6 +81,16 @@ public struct BackfillAgent: Sendable {
         let mappings = config.symbols.symbols.filter { mapping in
             selected?.contains(mapping.logicalSymbol) ?? true
         }
+        let liveSnapshot = try bridge.serverTimeSnapshot()
+        try await BrokerOffsetAutoAuthority(
+            clickHouse: clickHouse,
+            database: config.clickHouse.database,
+            logger: logger
+        ).ensureLiveSegmentIfMissing(
+            brokerSourceId: config.brokerTime.brokerSourceId,
+            terminalIdentity: terminalIdentity,
+            snapshot: liveSnapshot
+        )
         let offsetMap = try await offsetStore.loadVerifiedOffsetMap(
             brokerSourceId: config.brokerTime.brokerSourceId,
             terminalIdentity: terminalIdentity
@@ -88,7 +98,7 @@ public struct BackfillAgent: Sendable {
         logger.ok("Loaded \(offsetMap.segments.count) verified broker UTC offset segment(s) from ClickHouse for \(terminalIdentity)")
         let offsetAuthoritySHA256 = offsetMap.authoritySHA256()
         try BrokerOffsetRuntimeVerifier().verify(
-            snapshot: bridge.serverTimeSnapshot(),
+            snapshot: liveSnapshot,
             offsetMap: offsetMap,
             acceptedLiveOffsetSeconds: config.brokerTime.acceptedLiveOffsetSeconds,
             logger: logger

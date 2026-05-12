@@ -6,6 +6,8 @@ public struct ClickHouseConfig: Codable, Sendable {
     public let database: String
     public let username: String?
     public let password: String?
+    public let passwordEnvironmentVariable: String?
+    public let allowPlaintextRemotePassword: Bool
     public let requestTimeoutSeconds: Double
     public let retryCount: Int
     public let allowInsecureRemoteHTTP: Bool
@@ -25,6 +27,8 @@ public struct ClickHouseConfig: Codable, Sendable {
             database: database,
             username: username,
             password: password,
+            passwordEnvironmentVariable: nil,
+            allowPlaintextRemotePassword: false,
             requestTimeoutSeconds: requestTimeoutSeconds,
             retryCount: retryCount,
             allowInsecureRemoteHTTP: false,
@@ -38,6 +42,8 @@ public struct ClickHouseConfig: Codable, Sendable {
         database: String,
         username: String?,
         password: String?,
+        passwordEnvironmentVariable: String? = nil,
+        allowPlaintextRemotePassword: Bool = false,
         requestTimeoutSeconds: Double,
         retryCount: Int,
         allowInsecureRemoteHTTP: Bool,
@@ -48,6 +54,8 @@ public struct ClickHouseConfig: Codable, Sendable {
         self.database = database
         self.username = username
         self.password = password
+        self.passwordEnvironmentVariable = passwordEnvironmentVariable
+        self.allowPlaintextRemotePassword = allowPlaintextRemotePassword
         self.requestTimeoutSeconds = requestTimeoutSeconds
         self.retryCount = retryCount
         self.allowInsecureRemoteHTTP = allowInsecureRemoteHTTP
@@ -60,6 +68,8 @@ public struct ClickHouseConfig: Codable, Sendable {
         case database
         case username
         case password
+        case passwordEnvironmentVariable
+        case allowPlaintextRemotePassword
         case requestTimeoutSeconds
         case retryCount
         case allowInsecureRemoteHTTP
@@ -74,6 +84,8 @@ public struct ClickHouseConfig: Codable, Sendable {
             database: container.decode(String.self, forKey: .database),
             username: container.decodeIfPresent(String.self, forKey: .username),
             password: container.decodeIfPresent(String.self, forKey: .password),
+            passwordEnvironmentVariable: container.decodeIfPresent(String.self, forKey: .passwordEnvironmentVariable),
+            allowPlaintextRemotePassword: container.decodeIfPresent(Bool.self, forKey: .allowPlaintextRemotePassword) ?? false,
             requestTimeoutSeconds: container.decode(Double.self, forKey: .requestTimeoutSeconds),
             retryCount: container.decode(Int.self, forKey: .retryCount),
             allowInsecureRemoteHTTP: container.decodeIfPresent(Bool.self, forKey: .allowInsecureRemoteHTTP) ?? false,
@@ -88,6 +100,8 @@ public struct ClickHouseConfig: Codable, Sendable {
         try container.encode(database, forKey: .database)
         try container.encodeIfPresent(username, forKey: .username)
         try container.encodeIfPresent(password, forKey: .password)
+        try container.encodeIfPresent(passwordEnvironmentVariable, forKey: .passwordEnvironmentVariable)
+        try container.encode(allowPlaintextRemotePassword, forKey: .allowPlaintextRemotePassword)
         try container.encode(requestTimeoutSeconds, forKey: .requestTimeoutSeconds)
         try container.encode(retryCount, forKey: .retryCount)
         try container.encode(allowInsecureRemoteHTTP, forKey: .allowInsecureRemoteHTTP)
@@ -102,6 +116,15 @@ public struct ClickHouseConfig: Codable, Sendable {
 
     public var usesInsecureRemoteHTTP: Bool {
         url.scheme == "http" && !isLocalEndpoint
+    }
+
+    public var resolvedPassword: String? {
+        if let passwordEnvironmentVariable,
+           !passwordEnvironmentVariable.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           let value = ProcessInfo.processInfo.environment[passwordEnvironmentVariable] {
+            return value
+        }
+        return password
     }
 }
 

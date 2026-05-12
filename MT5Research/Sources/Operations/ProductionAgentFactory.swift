@@ -18,6 +18,7 @@ public struct ProductionAgentFactory: Sendable {
             SupervisorCoordinatorAgent(intervalSeconds: supervisor.healthCheckIntervalSeconds),
             SymbolMetadataDriftAgent(intervalSeconds: supervisor.symbolMetadataCheckIntervalSeconds),
             CheckpointGapAuditAgent(intervalSeconds: supervisor.checkpointAuditIntervalSeconds),
+            DataCertificationAgent(intervalSeconds: supervisor.backupCheckIntervalSeconds),
             BackupReadinessAgent(intervalSeconds: supervisor.backupCheckIntervalSeconds),
             AlertingAgent(intervalSeconds: supervisor.alertIntervalSeconds)
         ]

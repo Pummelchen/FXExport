@@ -7,22 +7,29 @@ public struct AgentExecutionPolicy: Sendable {
         var blocked: [ProductionAgentKind: String] = [:]
         if dueKinds.contains(.historyImporter) {
             block(
-                [.liveM1Updater, .databaseVerifierRepairer, .checkpointGapAuditor, .backupReadiness],
+                [.liveM1Updater, .databaseVerifierRepairer, .checkpointGapAuditor, .dataCertification, .backupReadiness],
                 reason: "history_importer owns first-run/resume canonical writes this cycle",
                 into: &blocked
             )
         }
         if dueKinds.contains(.databaseVerifierRepairer) {
             block(
-                [.backupReadiness],
-                reason: "database_verifier_repairer must settle data quality before backup readiness",
+                [.dataCertification, .backupReadiness],
+                reason: "database_verifier_repairer must settle data quality before certification or backup readiness",
                 into: &blocked
             )
         }
         if dueKinds.contains(.checkpointGapAuditor) {
             block(
+                [.dataCertification, .backupReadiness],
+                reason: "checkpoint_gap_auditor must validate checkpoint/canonical consistency before certification or backup readiness",
+                into: &blocked
+            )
+        }
+        if dueKinds.contains(.dataCertification) {
+            block(
                 [.backupReadiness],
-                reason: "checkpoint_gap_auditor must validate checkpoint/canonical consistency first",
+                reason: "data_certification must write cryptographic certificates before backup readiness",
                 into: &blocked
             )
         }
@@ -37,7 +44,7 @@ public struct AgentExecutionPolicy: Sendable {
         case .healthMonitor:
             if outcome.status == .failed {
                 block(
-                    [.utcTimeAuthority, .symbolMetadataDrift, .historyImporter, .liveM1Updater, .databaseVerifierRepairer, .checkpointGapAuditor, .backupReadiness],
+                    [.utcTimeAuthority, .symbolMetadataDrift, .historyImporter, .liveM1Updater, .databaseVerifierRepairer, .checkpointGapAuditor, .dataCertification, .backupReadiness],
                     reason: reason,
                     into: &blocked
                 )
@@ -49,10 +56,12 @@ public struct AgentExecutionPolicy: Sendable {
                 block([.historyImporter, .liveM1Updater, .databaseVerifierRepairer], reason: reason, into: &blocked)
             }
         case .historyImporter:
-            block([.liveM1Updater, .databaseVerifierRepairer, .checkpointGapAuditor, .backupReadiness], reason: reason, into: &blocked)
+            block([.liveM1Updater, .databaseVerifierRepairer, .checkpointGapAuditor, .dataCertification, .backupReadiness], reason: reason, into: &blocked)
         case .databaseVerifierRepairer:
-            block([.backupReadiness], reason: reason, into: &blocked)
+            block([.dataCertification, .backupReadiness], reason: reason, into: &blocked)
         case .checkpointGapAuditor:
+            block([.dataCertification, .backupReadiness], reason: reason, into: &blocked)
+        case .dataCertification:
             block([.backupReadiness], reason: reason, into: &blocked)
         case .liveM1Updater:
             if outcome.status == .failed {
@@ -70,7 +79,8 @@ public struct AgentExecutionPolicy: Sendable {
         .databaseVerifierRepairer,
         .utcTimeAuthority,
         .symbolMetadataDrift,
-        .checkpointGapAuditor
+        .checkpointGapAuditor,
+        .dataCertification
     ]
 
     public static let backtestRequiredOkAgentKinds: Set<ProductionAgentKind> = [
@@ -78,7 +88,8 @@ public struct AgentExecutionPolicy: Sendable {
         .symbolMetadataDrift,
         .liveM1Updater,
         .databaseVerifierRepairer,
-        .checkpointGapAuditor
+        .checkpointGapAuditor,
+        .dataCertification
     ]
 
     private func block(

@@ -173,7 +173,10 @@ void HandleTerminalInfo(const string requestId, const string command)
    payload += "\"terminal_name\":\"" + JsonEscape(TerminalInfoString(TERMINAL_NAME)) + "\",";
    payload += "\"company\":\"" + JsonEscape(AccountInfoString(ACCOUNT_COMPANY)) + "\",";
    payload += "\"server\":\"" + JsonEscape(AccountInfoString(ACCOUNT_SERVER)) + "\",";
-   payload += "\"account_login\":" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
+   payload += "\"account_login\":" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN)) + ",";
+   payload += "\"account_currency\":\"" + JsonEscape(AccountInfoString(ACCOUNT_CURRENCY)) + "\",";
+   payload += "\"account_leverage\":" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LEVERAGE)) + ",";
+   payload += "\"account_margin_mode\":" + IntegerToString((long)AccountInfoInteger(ACCOUNT_MARGIN_MODE));
    payload += "}";
    SendOK(requestId, command, payload);
 }
@@ -216,12 +219,71 @@ void HandleSymbolInfo(const string requestId, const string command, const string
 void SendSymbolInfo(const string requestId, const string command, const string symbol, const bool selected)
 {
    long digits = SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+   long spread = SymbolInfoInteger(symbol, SYMBOL_SPREAD);
+   long spreadFloat = SymbolInfoInteger(symbol, SYMBOL_SPREAD_FLOAT);
+   long swapMode = SymbolInfoInteger(symbol, SYMBOL_SWAP_MODE);
+   long tradeCalcMode = SymbolInfoInteger(symbol, SYMBOL_TRADE_CALC_MODE);
+   long tradeMode = SymbolInfoInteger(symbol, SYMBOL_TRADE_MODE);
+   double bid = SymbolInfoDouble(symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(symbol, SYMBOL_ASK);
+   double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+   double contractSize = SymbolInfoDouble(symbol, SYMBOL_TRADE_CONTRACT_SIZE);
+   double volumeMin = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
+   double volumeStep = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
+   double volumeMax = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX);
+   double swapLong = SymbolInfoDouble(symbol, SYMBOL_SWAP_LONG);
+   double swapShort = SymbolInfoDouble(symbol, SYMBOL_SWAP_SHORT);
+   double marginInitial = SymbolInfoDouble(symbol, SYMBOL_MARGIN_INITIAL);
+   double marginMaintenance = SymbolInfoDouble(symbol, SYMBOL_MARGIN_MAINTENANCE);
+   double tickSize = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
+   double tickValue = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickValueProfit = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_VALUE_PROFIT);
+   double tickValueLoss = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_VALUE_LOSS);
+   double marginCalcLots = MarginCalcLots(volumeMin, volumeMax);
+   double marginBuy = 0.0;
+   double marginSell = 0.0;
+   bool hasBuyMargin = OrderCalcMargin(ORDER_TYPE_BUY, symbol, marginCalcLots, ask, marginBuy);
+   bool hasSellMargin = OrderCalcMargin(ORDER_TYPE_SELL, symbol, marginCalcLots, bid, marginSell);
+
    string payload = "{";
    payload += "\"mt5_symbol\":\"" + JsonEscape(symbol) + "\",";
    payload += "\"selected\":" + (selected ? "true" : "false") + ",";
-   payload += "\"digits\":" + IntegerToString(digits);
+   payload += "\"digits\":" + IntegerToString(digits) + ",";
+   payload += "\"bid\":" + JsonDouble(bid, (int)digits) + ",";
+   payload += "\"ask\":" + JsonDouble(ask, (int)digits) + ",";
+   payload += "\"point\":" + JsonDouble(point, 12) + ",";
+   payload += "\"spread\":" + IntegerToString(spread) + ",";
+   payload += "\"spread_float\":" + (spreadFloat != 0 ? "true" : "false") + ",";
+   payload += "\"contract_size\":" + JsonDouble(contractSize, 8) + ",";
+   payload += "\"volume_min\":" + JsonDouble(volumeMin, 8) + ",";
+   payload += "\"volume_step\":" + JsonDouble(volumeStep, 8) + ",";
+   payload += "\"volume_max\":" + JsonDouble(volumeMax, 8) + ",";
+   payload += "\"swap_long\":" + JsonDouble(swapLong, 8) + ",";
+   payload += "\"swap_short\":" + JsonDouble(swapShort, 8) + ",";
+   payload += "\"swap_mode\":" + IntegerToString(swapMode) + ",";
+   payload += "\"margin_initial\":" + JsonOptionalDouble(marginInitial, 8) + ",";
+   payload += "\"margin_maintenance\":" + JsonOptionalDouble(marginMaintenance, 8) + ",";
+   payload += "\"margin_buy\":" + (hasBuyMargin ? JsonDouble(marginBuy, 8) : "null") + ",";
+   payload += "\"margin_sell\":" + (hasSellMargin ? JsonDouble(marginSell, 8) : "null") + ",";
+   payload += "\"margin_calc_lots\":" + JsonDouble(marginCalcLots, 8) + ",";
+   payload += "\"trade_calc_mode\":" + IntegerToString(tradeCalcMode) + ",";
+   payload += "\"trade_mode\":" + IntegerToString(tradeMode) + ",";
+   payload += "\"tick_size\":" + JsonDouble(tickSize, 12) + ",";
+   payload += "\"tick_value\":" + JsonDouble(tickValue, 8) + ",";
+   payload += "\"tick_value_profit\":" + JsonOptionalDouble(tickValueProfit, 8) + ",";
+   payload += "\"tick_value_loss\":" + JsonOptionalDouble(tickValueLoss, 8);
    payload += "}";
    SendOK(requestId, command, payload);
+}
+
+double MarginCalcLots(const double volumeMin, const double volumeMax)
+{
+   double lots = 1.0;
+   if(volumeMin > 0.0 && lots < volumeMin)
+      lots = volumeMin;
+   if(volumeMax > 0.0 && lots > volumeMax)
+      lots = volumeMax;
+   return lots;
 }
 
 void HandleHistoryStatus(const string requestId, const string command, const string payload)
@@ -683,6 +745,27 @@ int PayloadByteLength(const string payload)
 {
    uchar bytes[];
    return StringToCharArray(payload, bytes, 0, WHOLE_ARRAY, CP_UTF8) - 1;
+}
+
+string JsonDouble(const double value, const int digits)
+{
+   if(!MathIsValidNumber(value))
+      return "null";
+   return DoubleToString(value, SafeDoubleDigits(digits));
+}
+
+string JsonOptionalDouble(const double value, const int digits)
+{
+   if(!MathIsValidNumber(value) || value == 0.0)
+      return "null";
+   return DoubleToString(value, SafeDoubleDigits(digits));
+}
+
+int SafeDoubleDigits(const int digits)
+{
+   if(digits < 0)
+      return 0;
+   return digits;
 }
 
 string ULongToHex(ulong value)

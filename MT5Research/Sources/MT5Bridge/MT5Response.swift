@@ -18,12 +18,18 @@ public struct TerminalInfoDTO: Codable, Sendable {
     public let company: String
     public let server: String
     public let accountLogin: Int64
+    public let accountCurrency: String?
+    public let accountLeverage: Int?
+    public let accountMarginMode: Int?
 
     enum CodingKeys: String, CodingKey {
         case terminalName = "terminal_name"
         case company
         case server
         case accountLogin = "account_login"
+        case accountCurrency = "account_currency"
+        case accountLeverage = "account_leverage"
+        case accountMarginMode = "account_margin_mode"
     }
 
     public func brokerServerIdentity() throws -> BrokerServerIdentity {
@@ -35,11 +41,57 @@ public struct SymbolInfoDTO: Codable, Sendable {
     public let mt5Symbol: String
     public let selected: Bool
     public let digits: Int
+    public let bid: Double?
+    public let ask: Double?
+    public let point: Double?
+    public let spread: Int?
+    public let spreadFloat: Bool?
+    public let contractSize: Double?
+    public let volumeMin: Double?
+    public let volumeStep: Double?
+    public let volumeMax: Double?
+    public let swapLong: Double?
+    public let swapShort: Double?
+    public let swapMode: Int?
+    public let marginInitial: Double?
+    public let marginMaintenance: Double?
+    public let marginBuy: Double?
+    public let marginSell: Double?
+    public let marginCalcLots: Double?
+    public let tradeCalcMode: Int?
+    public let tradeMode: Int?
+    public let tickSize: Double?
+    public let tickValue: Double?
+    public let tickValueProfit: Double?
+    public let tickValueLoss: Double?
 
     enum CodingKeys: String, CodingKey {
         case mt5Symbol = "mt5_symbol"
         case selected
         case digits
+        case bid
+        case ask
+        case point
+        case spread
+        case spreadFloat = "spread_float"
+        case contractSize = "contract_size"
+        case volumeMin = "volume_min"
+        case volumeStep = "volume_step"
+        case volumeMax = "volume_max"
+        case swapLong = "swap_long"
+        case swapShort = "swap_short"
+        case swapMode = "swap_mode"
+        case marginInitial = "margin_initial"
+        case marginMaintenance = "margin_maintenance"
+        case marginBuy = "margin_buy"
+        case marginSell = "margin_sell"
+        case marginCalcLots = "margin_calc_lots"
+        case tradeCalcMode = "trade_calc_mode"
+        case tradeMode = "trade_mode"
+        case tickSize = "tick_size"
+        case tickValue = "tick_value"
+        case tickValueProfit = "tick_value_profit"
+        case tickValueLoss = "tick_value_loss"
     }
 }
 

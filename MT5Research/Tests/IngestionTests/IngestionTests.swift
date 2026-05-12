@@ -7,6 +7,22 @@ import TimeMapping
 import XCTest
 
 final class IngestionTests: XCTestCase {
+    func testBrokerSourceRegistryDerivesStableReadableBrokerId() throws {
+        let identity = try BrokerServerIdentity(company: "Raw Trading Ltd", server: "ICMarketsSC-MT5-4", accountLogin: 12345678)
+        let brokerSourceId = try BrokerSourceRegistry.deriveBrokerSourceId(from: identity)
+
+        XCTAssertEqual(brokerSourceId.rawValue, "icmarkets-sc-mt5-4-account-12345678")
+    }
+
+    func testBrokerOffsetPolicyKnowsICMarketsLiveOffsets() throws {
+        let identity = try BrokerServerIdentity(company: "Raw Trading Ltd", server: "ICMarketsSC-MT5-4", accountLogin: 12345678)
+
+        XCTAssertEqual(
+            BrokerOffsetPolicy.acceptedLiveOffsets(for: identity),
+            [OffsetSeconds(rawValue: 7_200), OffsetSeconds(rawValue: 10_800)]
+        )
+    }
+
     func testBatchBuilderRange() {
         let builder = BatchBuilder(chunkSize: 2)
         let range = builder.nextRange(start: MT5ServerSecond(rawValue: 120), endInclusive: MT5ServerSecond(rawValue: 600))

@@ -67,6 +67,12 @@ struct MT5ResearchCLI {
                 let hello = try bridge.hello()
                 logger.ok("MT5 bridge connected: \(hello.bridgeName) \(hello.bridgeVersion)")
                 let terminal = try bridge.terminalInfo()
+                let config = try await resolveBrokerConfigurationIfNeeded(
+                    config: config,
+                    clickHouse: clickHouse,
+                    terminal: terminal,
+                    logger: logger
+                )
                 logger.ok("MT5 terminal: \(terminal.terminalName), server \(terminal.server), account \(terminal.accountLogin)")
                 _ = try await verifyLiveBrokerOffset(
                     bridge: bridge,
@@ -100,12 +106,24 @@ struct MT5ResearchCLI {
                 return failureCount == 0 ? .success : .validation
 
             case .backfill:
-                let lock = try SupervisorLock.acquireRuntime(
-                    brokerSourceId: config.brokerTime.brokerSourceId.rawValue,
+                let originalConfig = config
+                let initialLock = try acquireInitialRuntimeLock(config: config, owner: "backfill")
+                logger.ok("Initial broker runtime lock acquired: \(initialLock.path)")
+                let bridge = try connectBridge(config: config, logger: logger)
+                let terminal = try bridge.terminalInfo()
+                let config = try await resolveBrokerConfigurationIfNeeded(
+                    config: config,
+                    clickHouse: clickHouse,
+                    terminal: terminal,
+                    logger: logger
+                )
+                let lock = try acquireResolvedRuntimeLockIfNeeded(
+                    initialLock: initialLock,
+                    originalConfig: originalConfig,
+                    resolvedConfig: config,
                     owner: "backfill"
                 )
                 logger.ok("Broker runtime lock acquired: \(lock.path)")
-                let bridge = try connectBridge(config: config, logger: logger)
                 let checkpointStore = ClickHouseCheckpointStore(
                     client: clickHouse,
                     insertBuilder: ClickHouseInsertBuilder(database: config.clickHouse.database),
@@ -122,12 +140,27 @@ struct MT5ResearchCLI {
                 )
                 let symbols = try selectedSymbols(from: options.symbolsArgument)
                 try await agent.run(selectedSymbols: symbols)
+                _ = initialLock
                 _ = lock
                 return .success
 
             case .live:
-                let lock = try SupervisorLock.acquireRuntime(
-                    brokerSourceId: config.brokerTime.brokerSourceId.rawValue,
+                let originalConfig = config
+                let initialLock = try acquireInitialRuntimeLock(config: config, owner: "live")
+                logger.ok("Initial broker runtime lock acquired: \(initialLock.path)")
+                let bridge = try connectBridge(config: config, logger: logger)
+                let terminal = try bridge.terminalInfo()
+                let config = try await resolveBrokerConfigurationIfNeeded(
+                    config: config,
+                    clickHouse: clickHouse,
+                    terminal: terminal,
+                    logger: logger
+                )
+                bridge.close()
+                let lock = try acquireResolvedRuntimeLockIfNeeded(
+                    initialLock: initialLock,
+                    originalConfig: originalConfig,
+                    resolvedConfig: config,
                     owner: "live"
                 )
                 logger.ok("Broker runtime lock acquired: \(lock.path)")
@@ -136,12 +169,27 @@ struct MT5ResearchCLI {
                     clickHouse: clickHouse,
                     logger: logger
                 )
+                _ = initialLock
                 _ = lock
                 return .success
 
             case .supervise:
-                let lock = try SupervisorLock.acquireRuntime(
-                    brokerSourceId: config.brokerTime.brokerSourceId.rawValue,
+                let originalConfig = config
+                let initialLock = try acquireInitialRuntimeLock(config: config, owner: "supervise")
+                logger.ok("Initial broker runtime lock acquired: \(initialLock.path)")
+                let bridge = try connectBridge(config: config, logger: logger)
+                let terminal = try bridge.terminalInfo()
+                let config = try await resolveBrokerConfigurationIfNeeded(
+                    config: config,
+                    clickHouse: clickHouse,
+                    terminal: terminal,
+                    logger: logger
+                )
+                bridge.close()
+                let lock = try acquireResolvedRuntimeLockIfNeeded(
+                    initialLock: initialLock,
+                    originalConfig: originalConfig,
+                    resolvedConfig: config,
                     owner: "supervise"
                 )
                 logger.ok("Broker runtime lock acquired: \(lock.path)")
@@ -160,6 +208,7 @@ struct MT5ResearchCLI {
                     runBackfillOnStart: options.runBackfillOnStart ?? config.app.supervisor.runBackfillOnStart
                 )
                 try await supervisor.run(maxCycles: options.supervisorCycles)
+                _ = initialLock
                 _ = lock
                 return .success
 
@@ -184,12 +233,21 @@ struct MT5ResearchCLI {
             case .verify:
                 let randomRangeCount = options.randomRanges ?? config.app.verifierRandomRanges
                 let bridge: MT5BridgeClient?
+                var verifyConfig = config
                 if options.shouldConnectBridgeForVerify(randomRangeCount: randomRangeCount) {
-                    bridge = try connectBridge(config: config, logger: logger)
+                    let connectedBridge = try connectBridge(config: config, logger: logger)
+                    let terminal = try connectedBridge.terminalInfo()
+                    verifyConfig = try await resolveBrokerConfigurationIfNeeded(
+                        config: config,
+                        clickHouse: clickHouse,
+                        terminal: terminal,
+                        logger: logger
+                    )
+                    bridge = connectedBridge
                 } else {
                     bridge = nil
                 }
-                try await VerificationAgent(config: config, bridge: bridge, clickHouse: clickHouse, logger: logger)
+                try await VerificationAgent(config: verifyConfig, bridge: bridge, clickHouse: clickHouse, logger: logger)
                     .startupChecks(randomRanges: randomRangeCount)
                 return .success
 
@@ -237,11 +295,28 @@ struct MT5ResearchCLI {
 
             case .fxBacktestAPI:
                 let service = FXExportBacktestHistoryService(config: config, clickHouse: clickHouse)
-                let handler = FXBacktestAPIHTTPHandler(historyProvider: service)
+                let executionService = FXExportBacktestExecutionService(
+                    config: config,
+                    clickHouse: clickHouse,
+                    bridgeConnector: {
+                        try connectBridge(config: config, logger: logger)
+                    }
+                )
+                let handler = FXBacktestAPIHTTPHandler(historyProvider: service, executionProvider: executionService)
                 try await FXBacktestAPIServer(
                     host: options.apiHost,
                     port: options.apiPort,
                     handler: handler,
+                    logger: logger
+                ).run()
+                return .success
+
+            case .healthAPI:
+                let service = OperationalHealthService(config: config, clickHouse: clickHouse)
+                try await OperationalHealthServer(
+                    host: options.apiHost,
+                    port: options.apiPort,
+                    service: service,
                     logger: logger
                 ).run()
                 return .success
@@ -551,6 +626,16 @@ struct MT5ResearchCLI {
             expected: config.brokerTime.expectedTerminalIdentity,
             logger: logger
         )
+        let liveSnapshot = try bridge.serverTimeSnapshot()
+        try await BrokerOffsetAutoAuthority(
+            clickHouse: clickHouse,
+            database: config.clickHouse.database,
+            logger: logger
+        ).ensureLiveSegmentIfMissing(
+            brokerSourceId: config.brokerTime.brokerSourceId,
+            terminalIdentity: terminalIdentity,
+            snapshot: liveSnapshot
+        )
         let offsetMap = try await ClickHouseBrokerOffsetStore(
             client: clickHouse,
             database: config.clickHouse.database
@@ -560,12 +645,50 @@ struct MT5ResearchCLI {
         )
         logger.ok("Loaded \(offsetMap.segments.count) verified broker UTC offset segment(s) from ClickHouse for \(terminalIdentity)")
         try BrokerOffsetRuntimeVerifier().verify(
-            snapshot: bridge.serverTimeSnapshot(),
+            snapshot: liveSnapshot,
             offsetMap: offsetMap,
             acceptedLiveOffsetSeconds: config.brokerTime.acceptedLiveOffsetSeconds,
             logger: logger
         )
         return offsetMap
+    }
+
+    private static func resolveBrokerConfigurationIfNeeded(
+        config: ConfigBundle,
+        clickHouse: ClickHouseClientProtocol,
+        terminal: TerminalInfoDTO,
+        logger: Logger
+    ) async throws -> ConfigBundle {
+        guard config.brokerTime.isAutomatic else {
+            return config
+        }
+        let resolution = try await BrokerSourceRegistry(
+            client: clickHouse,
+            database: config.clickHouse.database
+        ).resolve(terminalInfo: terminal)
+        let action = resolution.wasCreated ? "auto-discovered" : "auto-resolved"
+        logger.ok("Broker source \(action): \(resolution.brokerSourceId.rawValue) for \(resolution.terminalIdentity)")
+        return config.resolvingBrokerSourceId(resolution.brokerSourceId)
+    }
+
+    private static func acquireInitialRuntimeLock(config: ConfigBundle, owner: String) throws -> SupervisorLock {
+        let lockId = config.brokerTime.isAutomatic ? "auto-resolution" : config.brokerTime.brokerSourceId.rawValue
+        return try SupervisorLock.acquireRuntime(brokerSourceId: lockId, owner: "\(owner)-resolution")
+    }
+
+    private static func acquireResolvedRuntimeLockIfNeeded(
+        initialLock: SupervisorLock,
+        originalConfig: ConfigBundle,
+        resolvedConfig: ConfigBundle,
+        owner: String
+    ) throws -> SupervisorLock {
+        guard originalConfig.brokerTime.isAutomatic else {
+            return initialLock
+        }
+        return try SupervisorLock.acquireRuntime(
+            brokerSourceId: resolvedConfig.brokerTime.brokerSourceId.rawValue,
+            owner: owner
+        )
     }
 
     private static func runRepair(
@@ -587,13 +710,24 @@ struct MT5ResearchCLI {
             throw CLIError.invalidValue("--symbol")
         }
 
-        let lock = try SupervisorLock.acquireRuntime(
-            brokerSourceId: config.brokerTime.brokerSourceId.rawValue,
+        let originalConfig = config
+        let initialLock = try acquireInitialRuntimeLock(config: config, owner: "repair")
+        logger.ok("Initial broker runtime lock acquired: \(initialLock.path)")
+        let bridge = try connectBridge(config: config, logger: logger)
+        let terminal = try bridge.terminalInfo()
+        let config = try await resolveBrokerConfigurationIfNeeded(
+            config: config,
+            clickHouse: clickHouse,
+            terminal: terminal,
+            logger: logger
+        )
+        let lock = try acquireResolvedRuntimeLockIfNeeded(
+            initialLock: initialLock,
+            originalConfig: originalConfig,
+            resolvedConfig: config,
             owner: "repair"
         )
         logger.ok("Broker runtime lock acquired: \(lock.path)")
-        let bridge = try connectBridge(config: config, logger: logger)
-        let terminal = try bridge.terminalInfo()
         let offsetMap = try await verifyLiveBrokerOffset(
             bridge: bridge,
             clickHouse: clickHouse,
@@ -646,6 +780,7 @@ struct MT5ResearchCLI {
             }
         }
         logger.ok("\(symbol.rawValue): repair command completed for UTC range \(from.rawValue)..<\(to.rawValue)")
+        _ = initialLock
         _ = lock
     }
 
@@ -682,13 +817,14 @@ struct MT5ResearchCLI {
           repair --symbol EURUSD --from 2020-01-01 --to 2020-02-01
           data-check --config Config/history_data.json
           fxbacktest-api [--api-host 127.0.0.1] [--api-port 5066]
+          health-api [--api-host 127.0.0.1] [--api-port 5067]
 
         Command options:
           --config-dir Config
           --migrations-dir Migrations
           --config Config/history_data.json   # data-check only
-          --api-host 127.0.0.1                # fxbacktest-api only
-          --api-port 5066                     # fxbacktest-api only
+          --api-host 127.0.0.1                # fxbacktest-api / health-api
+          --api-port 5066                     # fxbacktest-api / health-api
           --verbose
           --debug
 
@@ -717,6 +853,7 @@ enum Command: Equatable {
     case exportCache
     case dataCheck
     case fxBacktestAPI
+    case healthAPI
     case backtest
     case optimize
     case help
@@ -727,7 +864,7 @@ private extension Command {
         switch self {
         case .help, .interactive, .failureGuide, .symbolCheck, .exportCache, .backtest, .optimize:
             return false
-        case .migrate, .bridgeCheck, .backfill, .live, .supervise, .startcheck, .verify, .repair, .dataCheck, .fxBacktestAPI:
+        case .migrate, .bridgeCheck, .backfill, .live, .supervise, .startcheck, .verify, .repair, .dataCheck, .fxBacktestAPI, .healthAPI:
             return true
         }
     }
@@ -740,7 +877,7 @@ private extension Command {
             return "backtest has been removed from FXExport. Use fxbacktest-api to serve verified history, then run strategies in FXBacktest or another external Swift app through FXBacktest API v1."
         case .optimize:
             return "optimize has been removed from FXExport. Long-running optimization belongs in an external Swift app with its own durable job model; FXExport only serves verified OHLC data."
-        case .interactive, .migrate, .bridgeCheck, .symbolCheck, .backfill, .live, .supervise, .startcheck, .failureGuide, .verify, .repair, .dataCheck, .fxBacktestAPI, .help:
+        case .interactive, .migrate, .bridgeCheck, .symbolCheck, .backfill, .live, .supervise, .startcheck, .failureGuide, .verify, .repair, .dataCheck, .fxBacktestAPI, .healthAPI, .help:
             return nil
         }
     }
@@ -959,7 +1096,7 @@ struct CLIOptions {
         if commandConfigPath != nil && command != .dataCheck && command != .backtest && command != .optimize {
             throw CLIError.invalidValue("--config")
         }
-        if (apiHost != "127.0.0.1" || apiPort != 5066) && command != .fxBacktestAPI {
+        if (apiHost != "127.0.0.1" || apiPort != 5066) && command != .fxBacktestAPI && command != .healthAPI {
             throw CLIError.invalidValue("--api-host/--api-port")
         }
 
@@ -998,6 +1135,7 @@ struct CLIOptions {
         case "export-cache": return .exportCache
         case "data-check": return .dataCheck
         case "fxbacktest-api": return .fxBacktestAPI
+        case "health-api": return .healthAPI
         case "backtest": return .backtest
         case "optimize": return .optimize
         case "help", "--help", "-h": return .help

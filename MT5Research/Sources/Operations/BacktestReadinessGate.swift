@@ -109,13 +109,13 @@ public struct BacktestReadinessGate: Sendable {
     public func assertReady(_ request: BacktestReadinessRequest) async throws {
         try validateRequest(request)
         try await validateIngestIsComplete(request)
-        try await validateNoUnfinishedIngestOperations()
+        try await validateNoUnfinishedIngestOperations(request)
         try await validateVerifiedCoverage(request)
-        try await validateCanonicalDatabase()
+        try await validateCanonicalDatabase(request)
         try await validateRequestedRangeHasData(request)
-        try await validateVerificationAndRepairState()
-        try await validateAgentState()
-        try await validateRequiredAgentOkState()
+        try await validateVerificationAndRepairState(request)
+        try await validateAgentState(request)
+        try await validateRequiredAgentOkState(request)
     }
 
     private func validateRequest(_ request: BacktestReadinessRequest) throws {
@@ -124,7 +124,7 @@ public struct BacktestReadinessGate: Sendable {
               request.utcEndExclusive.isMinuteAligned else {
             throw BacktestReadinessError.invalidRange(request.utcStart, request.utcEndExclusive)
         }
-        guard request.brokerSourceId == config.brokerTime.brokerSourceId else {
+        if !config.brokerTime.isAutomatic, request.brokerSourceId != config.brokerTime.brokerSourceId {
             throw BacktestReadinessError.brokerMismatch(expected: config.brokerTime.brokerSourceId, actual: request.brokerSourceId)
         }
         guard config.symbols.mapping(for: request.logicalSymbol) != nil else {
@@ -140,7 +140,7 @@ public struct BacktestReadinessGate: Sendable {
         )
         for mapping in config.symbols.symbols {
             guard let state = try await checkpointStore.latestState(
-                brokerSourceId: config.brokerTime.brokerSourceId,
+                brokerSourceId: request.brokerSourceId,
                 logicalSymbol: mapping.logicalSymbol
             ) else {
                 throw BacktestReadinessError.missingCheckpoint(mapping.logicalSymbol)
@@ -168,13 +168,13 @@ public struct BacktestReadinessGate: Sendable {
         }
     }
 
-    private func validateNoUnfinishedIngestOperations() async throws {
+    private func validateNoUnfinishedIngestOperations(_ request: BacktestReadinessRequest) async throws {
         let unfinished = try await scalar("""
         SELECT count()
         FROM (
             SELECT operation_type, batch_id, argMax(status, tuple(event_at_utc, status_rank)) AS latest_status
             FROM \(config.clickHouse.database).ingest_operations
-            WHERE broker_source_id = '\(SQLText.literal(config.brokerTime.brokerSourceId.rawValue))'
+            WHERE broker_source_id = '\(SQLText.literal(request.brokerSourceId.rawValue))'
             GROUP BY operation_type, batch_id
         )
         WHERE NOT (
@@ -224,13 +224,13 @@ public struct BacktestReadinessGate: Sendable {
         )
     }
 
-    private func validateCanonicalDatabase() async throws {
+    private func validateCanonicalDatabase(_ request: BacktestReadinessRequest) async throws {
         let duplicates = try await scalar("""
         SELECT count()
         FROM (
             SELECT broker_source_id, logical_symbol, ts_utc, count()
             FROM \(config.clickHouse.database).ohlc_m1_canonical
-            WHERE broker_source_id = '\(SQLText.literal(config.brokerTime.brokerSourceId.rawValue))'
+            WHERE broker_source_id = '\(SQLText.literal(request.brokerSourceId.rawValue))'
             GROUP BY broker_source_id, logical_symbol, ts_utc
             HAVING count() > 1
         )
@@ -241,7 +241,7 @@ public struct BacktestReadinessGate: Sendable {
         let ohlcFailures = try await scalar("""
         SELECT count()
         FROM \(config.clickHouse.database).ohlc_m1_canonical
-        WHERE broker_source_id = '\(SQLText.literal(config.brokerTime.brokerSourceId.rawValue))'
+        WHERE broker_source_id = '\(SQLText.literal(request.brokerSourceId.rawValue))'
           AND (open_scaled <= 0 OR high_scaled < open_scaled OR high_scaled < close_scaled OR high_scaled < low_scaled OR low_scaled > open_scaled OR low_scaled > close_scaled)
         FORMAT TabSeparated
         """)
@@ -250,7 +250,7 @@ public struct BacktestReadinessGate: Sendable {
         let nonVerifiedOffsets = try await scalar("""
         SELECT count()
         FROM \(config.clickHouse.database).ohlc_m1_canonical
-        WHERE broker_source_id = '\(SQLText.literal(config.brokerTime.brokerSourceId.rawValue))'
+        WHERE broker_source_id = '\(SQLText.literal(request.brokerSourceId.rawValue))'
           AND offset_confidence != 'verified'
         FORMAT TabSeparated
         """)
@@ -272,14 +272,14 @@ public struct BacktestReadinessGate: Sendable {
         }
     }
 
-    private func validateVerificationAndRepairState() async throws {
+    private func validateVerificationAndRepairState(_ request: BacktestReadinessRequest) async throws {
         let mismatches = try await scalar("""
         SELECT count()
         FROM (
             SELECT logical_symbol, range_start_mt5_server_ts, range_end_mt5_server_ts,
                    argMax(result, checked_at_utc) AS latest_result
             FROM \(config.clickHouse.database).verification_results
-            WHERE broker_source_id = '\(SQLText.literal(config.brokerTime.brokerSourceId.rawValue))'
+            WHERE broker_source_id = '\(SQLText.literal(request.brokerSourceId.rawValue))'
             GROUP BY logical_symbol, range_start_mt5_server_ts, range_end_mt5_server_ts
         )
         WHERE latest_result != 'clean'
@@ -293,7 +293,7 @@ public struct BacktestReadinessGate: Sendable {
             SELECT logical_symbol, range_start_mt5_server_ts, range_end_mt5_server_ts,
                    argMax(outcome, created_at_utc) AS latest_outcome
             FROM \(config.clickHouse.database).repair_log
-            WHERE broker_source_id = '\(SQLText.literal(config.brokerTime.brokerSourceId.rawValue))'
+            WHERE broker_source_id = '\(SQLText.literal(request.brokerSourceId.rawValue))'
             GROUP BY logical_symbol, range_start_mt5_server_ts, range_end_mt5_server_ts
         )
         WHERE latest_outcome = 'failed'
@@ -302,7 +302,7 @@ public struct BacktestReadinessGate: Sendable {
         guard failedRepairs == 0 else { throw BacktestReadinessError.failedRepairs(failedRepairs) }
     }
 
-    private func validateAgentState() async throws {
+    private func validateAgentState(_ request: BacktestReadinessRequest) async throws {
         let agentList = AgentExecutionPolicy.backtestBlockingAgentKinds
             .map { "'\(SQLText.literal($0.rawValue))'" }
             .sorted()
@@ -310,7 +310,7 @@ public struct BacktestReadinessGate: Sendable {
         let body = try await clickHouse.execute(.select("""
         SELECT agent_name, status, last_message
         FROM \(config.clickHouse.database).runtime_agent_state FINAL
-        WHERE broker_source_id = '\(SQLText.literal(config.brokerTime.brokerSourceId.rawValue))'
+        WHERE broker_source_id = '\(SQLText.literal(request.brokerSourceId.rawValue))'
           AND agent_name IN (\(agentList))
           AND status IN ('warning', 'failed')
         ORDER BY agent_name ASC
@@ -322,7 +322,7 @@ public struct BacktestReadinessGate: Sendable {
         }
     }
 
-    private func validateRequiredAgentOkState() async throws {
+    private func validateRequiredAgentOkState(_ request: BacktestReadinessRequest) async throws {
         let requiredAgents = AgentExecutionPolicy.backtestRequiredOkAgentKinds.sorted { $0.priorityRank < $1.priorityRank }
         let agentList = requiredAgents
             .map { "'\(SQLText.literal($0.rawValue))'" }
@@ -330,7 +330,7 @@ public struct BacktestReadinessGate: Sendable {
         let body = try await clickHouse.execute(.select("""
         SELECT agent_name, last_ok_at_utc
         FROM \(config.clickHouse.database).runtime_agent_state FINAL
-        WHERE broker_source_id = '\(SQLText.literal(config.brokerTime.brokerSourceId.rawValue))'
+        WHERE broker_source_id = '\(SQLText.literal(request.brokerSourceId.rawValue))'
           AND agent_name IN (\(agentList))
         FORMAT TabSeparated
         """))

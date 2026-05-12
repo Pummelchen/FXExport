@@ -26,7 +26,7 @@ public struct FXExportBacktestHistoryService: FXBacktestHistoryProviding {
             throw FXBacktestAPIServiceError.invalidRequest(String(describing: error))
         }
 
-        guard brokerSourceId == config.brokerTime.brokerSourceId else {
+        guard config.brokerTime.isAutomatic || brokerSourceId == config.brokerTime.brokerSourceId else {
             throw FXBacktestAPIServiceError.brokerMismatch(
                 expected: config.brokerTime.brokerSourceId.rawValue,
                 actual: brokerSourceId.rawValue

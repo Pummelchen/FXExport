@@ -11,6 +11,7 @@ public enum ProductionAgentKind: String, CaseIterable, Sendable {
     case supervisorCoordinator = "supervisor_coordinator"
     case symbolMetadataDrift = "symbol_metadata_drift"
     case checkpointGapAuditor = "checkpoint_gap_auditor"
+    case dataCertification = "data_certification"
     case backupReadiness = "backup_readiness"
     case alerting = "alerting"
 
@@ -24,6 +25,7 @@ public enum ProductionAgentKind: String, CaseIterable, Sendable {
         case .liveM1Updater: return 60
         case .databaseVerifierRepairer: return 70
         case .checkpointGapAuditor: return 80
+        case .dataCertification: return 85
         case .backupReadiness: return 90
         case .alerting: return 100
         }
@@ -47,6 +49,8 @@ public enum ProductionAgentKind: String, CaseIterable, Sendable {
             return "Symbol Guard"
         case .checkpointGapAuditor:
             return "Gap Auditor"
+        case .dataCertification:
+            return "Data Certifier"
         case .backupReadiness:
             return "Backup Readiness"
         case .alerting:
@@ -72,6 +76,8 @@ public enum ProductionAgentKind: String, CaseIterable, Sendable {
             return "Checking MT5 symbols and digits"
         case .checkpointGapAuditor:
             return "Checking checkpoints, gaps and live lag"
+        case .dataCertification:
+            return "Creating cryptographic data certificates for verified history"
         case .backupReadiness:
             return "Checking canonical history readiness for backup"
         case .alerting:
@@ -97,6 +103,8 @@ public enum ProductionAgentKind: String, CaseIterable, Sendable {
             return .magenta
         case .checkpointGapAuditor:
             return .yellow
+        case .dataCertification:
+            return .brightYellow
         case .backupReadiness:
             return .blue
         case .alerting:

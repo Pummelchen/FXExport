@@ -55,6 +55,7 @@ public struct StartCheckRunner: Sendable {
 
     public func run() async -> Bool {
         var result = StartCheckResult()
+        var activeConfig = config
         logger.info("STARTCHECK: validating the production path before go-live")
         logger.info("STARTCHECK: this command applies idempotent migrations, checks the EA, checks MT5, and verifies UTC authority")
 
@@ -102,10 +103,19 @@ public struct StartCheckRunner: Sendable {
                 throw StartCheckError.invalidBridge("bridge schema \(hello.schemaVersion), expected \(FramedProtocolCodec.schemaVersion)")
             }
             let terminal = try connectedBridge.terminalInfo()
+            if config.brokerTime.isAutomatic {
+                let resolution = try await BrokerSourceRegistry(
+                    client: clickHouse,
+                    database: config.clickHouse.database
+                ).resolve(terminalInfo: terminal)
+                activeConfig = config.resolvingBrokerSourceId(resolution.brokerSourceId)
+                let action = resolution.wasCreated ? "auto-discovered" : "auto-resolved"
+                logger.ok("Broker source \(action): \(resolution.brokerSourceId.rawValue) for \(resolution.terminalIdentity)")
+            }
             _ = try TerminalIdentityPolicy().resolve(
                 actual: terminal,
-                brokerSourceId: config.brokerTime.brokerSourceId,
-                expected: config.brokerTime.expectedTerminalIdentity,
+                brokerSourceId: activeConfig.brokerTime.brokerSourceId,
+                expected: activeConfig.brokerTime.expectedTerminalIdentity,
                 logger: logger
             )
             bridge = connectedBridge
@@ -121,26 +131,36 @@ public struct StartCheckRunner: Sendable {
             let terminal = try bridge.terminalInfo()
             let identity = try TerminalIdentityPolicy().resolve(
                 actual: terminal,
-                brokerSourceId: config.brokerTime.brokerSourceId,
-                expected: config.brokerTime.expectedTerminalIdentity,
+                brokerSourceId: activeConfig.brokerTime.brokerSourceId,
+                expected: activeConfig.brokerTime.expectedTerminalIdentity,
                 logger: logger
+            )
+            let liveSnapshot = try bridge.serverTimeSnapshot()
+            try await BrokerOffsetAutoAuthority(
+                clickHouse: clickHouse,
+                database: activeConfig.clickHouse.database,
+                logger: logger
+            ).ensureLiveSegmentIfMissing(
+                brokerSourceId: activeConfig.brokerTime.brokerSourceId,
+                terminalIdentity: identity,
+                snapshot: liveSnapshot
             )
             let offsetMap = try await ClickHouseBrokerOffsetStore(client: clickHouse, database: config.clickHouse.database)
                 .loadVerifiedOffsetMap(
-                    brokerSourceId: config.brokerTime.brokerSourceId,
+                    brokerSourceId: activeConfig.brokerTime.brokerSourceId,
                     terminalIdentity: identity
                 )
             try BrokerOffsetRuntimeVerifier().verify(
-                snapshot: bridge.serverTimeSnapshot(),
+                snapshot: liveSnapshot,
                 offsetMap: offsetMap,
-                acceptedLiveOffsetSeconds: config.brokerTime.acceptedLiveOffsetSeconds,
+                acceptedLiveOffsetSeconds: activeConfig.brokerTime.acceptedLiveOffsetSeconds,
                 logger: logger
             )
-            try verifyOffsetCoverage(bridge: bridge, offsetMap: offsetMap)
+            try verifyOffsetCoverage(bridge: bridge, offsetMap: offsetMap, config: activeConfig)
         }
 
         await step("7/7 Symbol, latest closed bar, and position API smoke check", result: &result) {
-            try verifySymbolsAndBridgeCommands(bridge: bridge)
+            try verifySymbolsAndBridgeCommands(bridge: bridge, config: activeConfig)
         }
 
         return result.finish(logger: logger)
@@ -170,7 +190,9 @@ public struct StartCheckRunner: Sendable {
             "runtime_agent_events",
             "runtime_agent_state",
             "ingest_operations",
-            "ohlc_m1_verified_coverage"
+            "ohlc_m1_verified_coverage",
+            "broker_sources",
+            "data_certificates"
         ]
         let quoted = requiredTables.map { "'\(SQLText.literal($0))'" }.joined(separator: ",")
         let sql = """
@@ -188,7 +210,7 @@ public struct StartCheckRunner: Sendable {
         }
     }
 
-    private func verifyOffsetCoverage(bridge: MT5BridgeClient, offsetMap: BrokerOffsetMap) throws {
+    private func verifyOffsetCoverage(bridge: MT5BridgeClient, offsetMap: BrokerOffsetMap, config: ConfigBundle) throws {
         var failures: [String] = []
         for mapping in config.symbols.symbols {
             let info = try bridge.prepareSymbol(mapping.mt5Symbol)
@@ -219,7 +241,7 @@ public struct StartCheckRunner: Sendable {
         }
     }
 
-    private func verifySymbolsAndBridgeCommands(bridge: MT5BridgeClient) throws {
+    private func verifySymbolsAndBridgeCommands(bridge: MT5BridgeClient, config: ConfigBundle) throws {
         guard let first = config.symbols.symbols.first else {
             throw StartCheckError.invalidBridge("no symbols configured")
         }

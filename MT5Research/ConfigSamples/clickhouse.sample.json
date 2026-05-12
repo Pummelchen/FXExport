@@ -3,6 +3,8 @@
   "database": "fxexport",
   "username": null,
   "password": null,
+  "passwordEnvironmentVariable": null,
+  "allowPlaintextRemotePassword": false,
   "requestTimeoutSeconds": 60,
   "retryCount": 2,
   "allowInsecureRemoteHTTP": false,

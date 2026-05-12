@@ -125,6 +125,32 @@ final class FXBacktestAPITests: XCTestCase {
         XCTAssertEqual(error.apiVersion, FXBacktestAPIV1.version)
         XCTAssertEqual(error.error.code, "invalid_request")
     }
+
+    func testHTTPHandlerServesExecutionSpecWithV1Envelope() async throws {
+        let handler = FXBacktestAPIHTTPHandler(
+            historyProvider: MockHistoryProvider(),
+            executionProvider: MockExecutionProvider()
+        )
+        let request = FXBacktestExecutionSpecRequest(
+            brokerSourceId: "demo",
+            symbols: [
+                FXBacktestExecutionSymbolRequest(logicalSymbol: "EURUSD", expectedMT5Symbol: "EURUSD", expectedDigits: 5)
+            ]
+        )
+
+        let response = await handler.handle(
+            method: "POST",
+            path: FXBacktestAPIV1.executionSpecPath,
+            body: try JSONEncoder().encode(request)
+        )
+
+        XCTAssertEqual(response.statusCode, 200)
+        let spec = try JSONDecoder().decode(FXBacktestExecutionSpecResponse.self, from: response.body)
+        XCTAssertEqual(spec.apiVersion, FXBacktestAPIV1.version)
+        XCTAssertEqual(spec.accountMode, "hedging")
+        XCTAssertEqual(spec.symbols.first?.spreadPoints, 12)
+        XCTAssertEqual(spec.symbols.first?.commissionSource, "not_exposed_by_mt5_symbol_info")
+    }
 }
 
 private struct MockHistoryProvider: FXBacktestHistoryProviding {
@@ -153,5 +179,53 @@ private struct MockHistoryProvider: FXBacktestHistoryProviding {
 private struct InvalidRequestProvider: FXBacktestHistoryProviding {
     func loadM1History(_ request: FXBacktestM1HistoryRequest) async throws -> FXBacktestM1HistoryResponse {
         throw FXBacktestAPIServiceError.invalidRequest("Invalid logical symbol.")
+    }
+}
+
+private struct MockExecutionProvider: FXBacktestExecutionProviding {
+    func loadExecutionSpec(_ request: FXBacktestExecutionSpecRequest) async throws -> FXBacktestExecutionSpecResponse {
+        FXBacktestExecutionSpecResponse(
+            brokerSourceId: request.brokerSourceId,
+            capturedAtUtc: 1_704_067_200,
+            accountCurrency: "USD",
+            accountLeverage: 100,
+            accountMode: "hedging",
+            mt5AccountMarginMode: 2,
+            symbols: [
+                FXBacktestExecutionSymbolSpec(
+                    logicalSymbol: request.symbols[0].logicalSymbol,
+                    mt5Symbol: request.symbols[0].expectedMT5Symbol ?? request.symbols[0].logicalSymbol,
+                    selected: true,
+                    digits: request.symbols[0].expectedDigits ?? 5,
+                    bid: 1.08000,
+                    ask: 1.08012,
+                    point: 0.00001,
+                    spreadPoints: 12,
+                    spreadFloat: true,
+                    contractSize: 100_000,
+                    volumeMin: 0.01,
+                    volumeStep: 0.01,
+                    volumeMax: 100,
+                    swapLongPerLot: -6.2,
+                    swapShortPerLot: 1.4,
+                    swapMode: 1,
+                    marginInitialPerLot: 1_080,
+                    marginMaintenancePerLot: nil,
+                    marginBuyPerLot: 1_080,
+                    marginSellPerLot: 1_079,
+                    marginCalcLots: 1,
+                    tradeCalcMode: 0,
+                    tradeMode: 4,
+                    tickSize: 0.00001,
+                    tickValue: 1,
+                    tickValueProfit: 1,
+                    tickValueLoss: 1,
+                    commissionPerLotPerSide: nil,
+                    commissionSource: "not_exposed_by_mt5_symbol_info",
+                    slippagePoints: 0,
+                    slippageSource: "deterministic_zero_default"
+                )
+            ]
+        )
     }
 }
