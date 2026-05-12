@@ -358,11 +358,23 @@ When stdout is a TTY and `NO_COLOR` is not set, FXExport uses ANSI colors compat
 During `supervise`, every production agent prints a timestamped status line with its own non-red color:
 
 ```text
-2026-05-15 13:34:16 - Agent live_m1_updater (M1 update agent) - Running scheduled task now
-2026-05-15 13:34:16 - Agent live_m1_updater (M1 update agent) - OK: no new closed M1 bars available (14 ms)
+2026-05-15 13:34:16 - Agent M1 Updater - Checking for newly closed M1 OHLC bars
+2026-05-15 13:34:16 - Agent M1 Updater - OK: live update completed (14 ms)
 ```
 
 Warnings and skipped work use the agent's assigned color instead of red. Failed agent outcomes use red and are also written to the alert sink when persistent alerts are enabled.
+
+Symbol-level work is printed in plain operator language:
+
+```text
+EURUSD - pulling M1 OHLC for March 2012
+EURUSD - validating March 2012 for OHLC integrity and verified UTC conversion
+EURUSD - March 2012 pulled, verified, UTC correct and canonical data clean (44,640 closed M1 bars)
+EURUSD - checking March 2012 against MT5 source of truth
+EURUSD - March 2012 verified against MT5; UTC correct and all canonical data clean
+```
+
+FXExport only prints "clean" after the relevant safety step has succeeded: validation plus canonical readback for ingestion, or MT5 source-of-truth comparison for verification. MT5 source gaps are reported as source gaps instead of being hidden as calendar-minute gaps.
 
 ## History Data Readiness Gate
 

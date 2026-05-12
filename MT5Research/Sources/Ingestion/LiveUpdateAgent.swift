@@ -98,7 +98,7 @@ public struct LiveUpdateAgent: Sendable {
             brokerSourceId: config.brokerTime.brokerSourceId,
             logicalSymbol: mapping.logicalSymbol
         ) else {
-            logger.warn("\(mapping.logicalSymbol.rawValue): no checkpoint exists; run backfill first")
+            logger.warn("\(mapping.logicalSymbol.rawValue) - no checkpoint exists; run historical import before live M1 updates")
             return
         }
         guard state.mt5Symbol == mapping.mt5Symbol else {
@@ -116,16 +116,21 @@ public struct LiveUpdateAgent: Sendable {
                 latestClosed: latestClosed.rawValue
             )
         }
-        guard latestClosed.rawValue > state.latestIngestedClosedMT5ServerTime.rawValue else { return }
+        guard latestClosed.rawValue > state.latestIngestedClosedMT5ServerTime.rawValue else {
+            logger.debug("\(mapping.logicalSymbol.rawValue) - no new closed M1 bar; checkpoint is current at \(state.latestIngestedClosedMT5ServerTime.rawValue) server time")
+            return
+        }
 
         let from = MT5ServerSecond(rawValue: state.latestIngestedClosedMT5ServerTime.rawValue + Timeframe.m1.seconds)
         let toExclusive = MT5ServerSecond(rawValue: latestClosed.rawValue + Timeframe.m1.seconds)
+        let rangeLabel = OperatorStatusText.monthRangeLabel(start: from, endExclusive: toExclusive)
         let batchId = BatchId.deterministic(
             brokerSourceId: config.brokerTime.brokerSourceId,
             logicalSymbol: mapping.logicalSymbol,
             start: from,
             end: toExclusive
         )
+        logger.info("\(mapping.logicalSymbol.rawValue) - pulling closed M1 OHLC for \(rangeLabel)")
         let response = try bridge.ratesRange(mt5Symbol: mapping.mt5Symbol, from: from, toExclusive: toExclusive, maxBars: config.app.chunkSize)
         guard response.mt5Symbol == mapping.mt5Symbol.rawValue else {
             throw IngestError.invalidBridgeResponse("expected rates for \(mapping.mt5Symbol.rawValue), got \(response.mt5Symbol)")
@@ -147,8 +152,12 @@ public struct LiveUpdateAgent: Sendable {
             batchId: batchId,
             ingestedAtUtc: now
         )
+        logger.info("\(mapping.logicalSymbol.rawValue) - validating \(rangeLabel) for OHLC integrity and verified UTC conversion")
         let validated = try validator.validateBatch(closedBars, context: context)
-        guard !validated.isEmpty else { return }
+        guard !validated.isEmpty else {
+            logger.warn("\(mapping.logicalSymbol.rawValue) - MT5 returned no closed M1 bars for \(rangeLabel); checkpoint was not advanced")
+            return
+        }
         let rawInsert = insertBuilder.rawBarsInsert(validated)
         let canonicalDelete = try insertBuilder.canonicalRangeDelete(validated)
         let canonicalInsert = try insertBuilder.canonicalBarsInsert(validated)
@@ -158,7 +167,7 @@ public struct LiveUpdateAgent: Sendable {
         _ = try await clickHouse.execute(canonicalDelete)
         _ = try await clickHouse.execute(canonicalInsert)
         try await CanonicalInsertVerifier(clickHouse: clickHouse, insertBuilder: insertBuilder).verify(validated)
-        guard let last = validated.last else { return }
+        guard let first = validated.first, let last = validated.last else { return }
         try await checkpointStore.save(IngestState(
             brokerSourceId: config.brokerTime.brokerSourceId,
             logicalSymbol: mapping.logicalSymbol,
@@ -170,7 +179,11 @@ public struct LiveUpdateAgent: Sendable {
             lastBatchId: batchId,
             updatedAtUtc: now
         ))
-        logger.ok("\(mapping.logicalSymbol.rawValue): live update inserted \(validated.count) closed M1 bars")
+        let verifiedRangeLabel = OperatorStatusText.monthRangeLabel(
+            start: first.utcTime,
+            endExclusive: UtcSecond(rawValue: last.utcTime.rawValue + Timeframe.m1.seconds)
+        )
+        logger.ok("\(mapping.logicalSymbol.rawValue) - \(verifiedRangeLabel) pulled, verified, UTC correct and canonical data clean (\(validated.count) new closed M1 bars)")
     }
 
     private func validateClosedBarsInRange(_ bars: [ClosedM1Bar], from: MT5ServerSecond, toExclusive: MT5ServerSecond) throws {

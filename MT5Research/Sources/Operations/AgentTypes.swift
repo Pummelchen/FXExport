@@ -32,25 +32,50 @@ public enum ProductionAgentKind: String, CaseIterable, Sendable {
     public var displayName: String {
         switch self {
         case .historyImporter:
-            return "First-run MT5 history importer"
+            return "History Importer"
         case .liveM1Updater:
-            return "M1 update agent"
+            return "M1 Updater"
         case .databaseVerifierRepairer:
-            return "Database verifier and cleaner"
+            return "Database Cleaner"
         case .utcTimeAuthority:
-            return "UTC time authority"
+            return "UTC Time Agent"
         case .healthMonitor:
-            return "Database and MT5 health monitor"
+            return "Health Monitor"
         case .supervisorCoordinator:
-            return "Supervisor coordinator"
+            return "Supervisor"
         case .symbolMetadataDrift:
-            return "Symbol metadata drift checker"
+            return "Symbol Guard"
         case .checkpointGapAuditor:
-            return "Checkpoint and gap auditor"
+            return "Gap Auditor"
         case .backupReadiness:
-            return "Backup readiness checker"
+            return "Backup Readiness"
         case .alerting:
-            return "Monitoring and alerting agent"
+            return "Alert Monitor"
+        }
+    }
+
+    public var startMessage: String {
+        switch self {
+        case .historyImporter:
+            return "Starting or resuming historical M1 OHLC import"
+        case .liveM1Updater:
+            return "Checking for newly closed M1 OHLC bars"
+        case .databaseVerifierRepairer:
+            return "Checking canonical data cleanliness and repair safety"
+        case .utcTimeAuthority:
+            return "Checking broker UTC offset authority"
+        case .healthMonitor:
+            return "Checking ClickHouse and MT5 bridge health"
+        case .supervisorCoordinator:
+            return "Checking supervisor ownership and schedule"
+        case .symbolMetadataDrift:
+            return "Checking MT5 symbols and digits"
+        case .checkpointGapAuditor:
+            return "Checking checkpoints, gaps and live lag"
+        case .backupReadiness:
+            return "Checking canonical history readiness for backup"
+        case .alerting:
+            return "Checking runtime alerts and disk pressure"
         }
     }
 

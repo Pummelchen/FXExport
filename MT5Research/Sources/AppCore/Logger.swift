@@ -102,7 +102,7 @@ public struct Logger: Sendable {
         guard level >= .normal || isError else { return }
         let fullMessage = details.isEmpty ? message : "\(message) | \(details)"
         let timestamp = Self.terminalTimestampString(timestampUtc: timestampUtc)
-        let line = "\(timestamp) - Agent \(agentId) (\(displayName)) - \(fullMessage)"
+        let line = "\(timestamp) - Agent \(displayName) - \(fullMessage)"
         let terminalColor: TerminalColor = isError ? .red : color
         print(colorPolicy.colorize(line, as: terminalColor))
         persistentLogSink?.write(level: levelName, component: "agent.\(agentId)", message: fullMessage)

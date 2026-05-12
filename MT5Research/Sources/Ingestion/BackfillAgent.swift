@@ -117,7 +117,7 @@ public struct BackfillAgent: Sendable {
         insertBuilder: ClickHouseInsertBuilder,
         batchBuilder: BatchBuilder
     ) async throws {
-        logger.info("\(mapping.logicalSymbol.rawValue): preparing MT5 symbol \(mapping.mt5Symbol.rawValue)")
+        logger.info("\(mapping.logicalSymbol.rawValue) - preparing MT5 symbol \(mapping.mt5Symbol.rawValue) for historical M1 OHLC import")
         let symbolInfo = try bridge.prepareSymbol(mapping.mt5Symbol)
         guard symbolInfo.selected else { throw IngestError.symbolMissing(mapping.mt5Symbol.rawValue) }
         guard symbolInfo.digits == mapping.digits.rawValue else {
@@ -125,7 +125,7 @@ public struct BackfillAgent: Sendable {
         }
         try await ensureHistorySynchronized(mapping: mapping)
 
-        logger.info("\(mapping.logicalSymbol.rawValue): discovering oldest available M1 bar")
+        logger.info("\(mapping.logicalSymbol.rawValue) - finding oldest available and latest closed M1 bar in MT5")
         let oldestResponse = try bridge.oldestM1BarTime(mapping.mt5Symbol)
         try validateSingleTimeResponse(oldestResponse, expectedMT5Symbol: mapping.mt5Symbol)
         let latestClosedResponse = try bridge.latestClosedM1Bar(mapping.mt5Symbol)
@@ -135,7 +135,7 @@ public struct BackfillAgent: Sendable {
         guard oldest.rawValue <= latestClosed.rawValue else {
             throw IngestError.emptyMT5Range(mapping.logicalSymbol.rawValue)
         }
-        logger.ok("\(mapping.logicalSymbol.rawValue): oldest \(oldest.rawValue), latest closed \(latestClosed.rawValue) server time")
+        logger.ok("\(mapping.logicalSymbol.rawValue) - MT5 history range found from \(oldest.rawValue) to \(latestClosed.rawValue) server time")
 
         let existingState = try await checkpointStore.latestState(
             brokerSourceId: config.brokerTime.brokerSourceId,
@@ -159,7 +159,8 @@ public struct BackfillAgent: Sendable {
                 start: range.from,
                 end: range.toExclusive
             )
-            logger.info("\(mapping.logicalSymbol.rawValue): backfilling \(config.app.chunkSize)-bar chunk from \(range.from.rawValue)")
+            let sourceRangeLabel = OperatorStatusText.monthRangeLabel(start: range.from, endExclusive: range.toExclusive)
+            logger.info("\(mapping.logicalSymbol.rawValue) - pulling M1 OHLC for \(sourceRangeLabel)")
 
             let response = try bridge.ratesRange(
                 mt5Symbol: mapping.mt5Symbol,
@@ -173,7 +174,7 @@ public struct BackfillAgent: Sendable {
             }
             try validateClosedBarsInRange(closedBars, from: range.from, toExclusive: range.toExclusive)
             guard !closedBars.isEmpty else {
-                logger.warn("\(mapping.logicalSymbol.rawValue): no MT5 bars in server-time range \(range.from.rawValue)..<\(range.toExclusive.rawValue); advancing over source gap")
+                logger.warn("\(mapping.logicalSymbol.rawValue) - no MT5 M1 bars available for \(sourceRangeLabel); treating this as an MT5 source gap and moving on")
                 cursor = range.toExclusive
                 continue
             }
@@ -188,10 +189,17 @@ public struct BackfillAgent: Sendable {
                 batchId: batchId,
                 ingestedAtUtc: now
             )
+            logger.info("\(mapping.logicalSymbol.rawValue) - validating \(sourceRangeLabel) for OHLC integrity and verified UTC conversion")
             let validated = try validator.validateBatch(closedBars, context: context)
             try await insertValidatedBars(validated, insertBuilder: insertBuilder)
 
-            guard let last = validated.last else { throw IngestError.invalidChunk("validated chunk unexpectedly empty") }
+            guard let first = validated.first, let last = validated.last else {
+                throw IngestError.invalidChunk("validated chunk unexpectedly empty")
+            }
+            let verifiedRangeLabel = OperatorStatusText.monthRangeLabel(
+                start: first.utcTime,
+                endExclusive: UtcSecond(rawValue: last.utcTime.rawValue + Timeframe.m1.seconds)
+            )
             let state = IngestState(
                 brokerSourceId: config.brokerTime.brokerSourceId,
                 logicalSymbol: mapping.logicalSymbol,
@@ -204,7 +212,7 @@ public struct BackfillAgent: Sendable {
                 updatedAtUtc: now
             )
             try await checkpointStore.save(state)
-            logger.ok("\(mapping.logicalSymbol.rawValue): inserted \(validated.count) validated M1 bars")
+            logger.ok("\(mapping.logicalSymbol.rawValue) - \(verifiedRangeLabel) pulled, verified, UTC correct and canonical data clean (\(validated.count) closed M1 bars)")
             cursor = MT5ServerSecond(rawValue: last.mt5ServerTime.rawValue + Timeframe.m1.seconds)
         }
     }
@@ -257,11 +265,11 @@ public struct BackfillAgent: Sendable {
                 throw IngestError.invalidBridgeResponse("expected history status for \(mapping.mt5Symbol.rawValue), got \(status.mt5Symbol)")
             }
             if status.synchronized && status.bars > 0 {
-                logger.ok("\(mapping.logicalSymbol.rawValue): MT5 M1 history synchronized with \(status.bars) local bars")
+                logger.ok("\(mapping.logicalSymbol.rawValue) - MT5 M1 history synchronized with \(status.bars) local bars")
                 return
             }
             if attempt == 1 || attempt % 5 == 0 || attempt == attempts {
-                logger.warn("\(mapping.logicalSymbol.rawValue): waiting for MT5 M1 history synchronization, attempt \(attempt)/\(attempts)")
+                logger.warn("\(mapping.logicalSymbol.rawValue) - waiting for MT5 M1 history synchronization, attempt \(attempt)/\(attempts)")
             }
             try await Task.sleep(nanoseconds: 1_000_000_000)
         }
@@ -271,13 +279,13 @@ public struct BackfillAgent: Sendable {
     private func logResumeDecision(_ decision: BackfillResumeDecision, logicalSymbol: LogicalSymbol) {
         switch decision.action {
         case .freshBackfill:
-            logger.info("\(logicalSymbol.rawValue): no checkpoint found; starting from MT5 oldest available bar")
+            logger.info("\(logicalSymbol.rawValue) - no checkpoint found; starting from MT5 oldest available bar")
         case .resumeFromCheckpoint:
-            logger.info("\(logicalSymbol.rawValue): resuming from checkpoint at \(decision.cursor.rawValue) server time")
+            logger.info("\(logicalSymbol.rawValue) - resuming from checkpoint at \(decision.cursor.rawValue) server time")
         case .reprocessExpandedOlderHistory:
-            logger.warn("\(logicalSymbol.rawValue): MT5 history now starts earlier than the stored checkpoint oldest; reprocessing from \(decision.cursor.rawValue) to keep canonical history complete")
+            logger.warn("\(logicalSymbol.rawValue) - MT5 history now starts earlier than the stored checkpoint oldest; reprocessing from \(decision.cursor.rawValue) to keep canonical history complete")
         case .resumeAfterPrunedHistory:
-            logger.warn("\(logicalSymbol.rawValue): MT5 no longer exposes the checkpoint's next server-time range; resuming at current MT5 oldest \(decision.cursor.rawValue)")
+            logger.warn("\(logicalSymbol.rawValue) - MT5 no longer exposes the checkpoint's next server-time range; resuming at current MT5 oldest \(decision.cursor.rawValue)")
         }
     }
 

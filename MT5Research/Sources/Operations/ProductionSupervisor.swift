@@ -86,7 +86,7 @@ public struct ProductionSupervisor: Sendable {
                         continue
                     }
                     do {
-                        logAgentStart(agent.descriptor.kind, message: "Connecting to MT5 bridge now", startedAt: startedAt)
+                        logAgentStart(agent.descriptor.kind, message: "Connecting to MT5 bridge before agent work", startedAt: startedAt)
                         logger.db("Connecting MT5 bridge for \(agent.descriptor.kind.rawValue)")
                         bridge = try bridgeConnector()
                         logger.ok("MT5 bridge connected for supervised agents")
@@ -121,7 +121,7 @@ public struct ProductionSupervisor: Sendable {
                 )
 
                 do {
-                    logAgentStart(agent.descriptor.kind, message: "Running scheduled task now", startedAt: startedAt)
+                    logAgentStart(agent.descriptor.kind, message: agent.descriptor.kind.startMessage, startedAt: startedAt)
                     let outcome = try await agent.run(context: context, startedAt: startedAt)
                     await recordAndLog(outcome)
                     Self.updatePersistentBlocks(

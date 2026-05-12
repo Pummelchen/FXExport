@@ -145,6 +145,26 @@ final class OperationsTests: XCTestCase {
             XCTAssertFalse(kind.displayName.isEmpty)
             XCTAssertNotEqual(kind.terminalColor, .red)
         }
+        XCTAssertEqual(ProductionAgentKind.liveM1Updater.displayName, "M1 Updater")
+        XCTAssertEqual(ProductionAgentKind.databaseVerifierRepairer.displayName, "Database Cleaner")
+        XCTAssertEqual(ProductionAgentKind.utcTimeAuthority.startMessage, "Checking broker UTC offset authority")
+    }
+
+    func testOperatorStatusTextFormatsHumanMonthRanges() {
+        XCTAssertEqual(
+            OperatorStatusText.monthRangeLabel(
+                startEpochSeconds: 1_330_560_000,
+                endExclusiveEpochSeconds: 1_333_238_400
+            ),
+            "March 2012"
+        )
+        XCTAssertEqual(
+            OperatorStatusText.monthRangeLabel(
+                startEpochSeconds: 1_333_238_400,
+                endExclusiveEpochSeconds: 1_338_508_800
+            ),
+            "April 2012-May 2012"
+        )
     }
 
     func testAlertingAgentReportsSafetyBlocksAndDiskPressure() async throws {

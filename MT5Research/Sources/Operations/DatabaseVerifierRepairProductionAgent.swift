@@ -1,3 +1,4 @@
+import AppCore
 import Domain
 import Foundation
 import Ingestion
@@ -75,11 +76,16 @@ public struct DatabaseVerifierRepairProductionAgent: ProductionAgent {
                     latestClosed: state.latestIngestedClosedMT5ServerTime,
                     random: &generator
                 )
+                let rangeLabel = OperatorStatusText.monthRangeLabel(start: range.mt5Start, endExclusive: range.mt5EndExclusive)
                 let outcome = try await verifier.verify(range: range)
                 checked += 1
-                guard !outcome.result.isClean else { continue }
+                guard !outcome.result.isClean else {
+                    context.logger.verify("\(mapping.logicalSymbol.rawValue) - \(rangeLabel) clean; no repair needed")
+                    continue
+                }
                 mismatchCount += outcome.result.mismatches.count
                 guard context.repairOnVerifierMismatch else {
+                    context.logger.warn("\(mapping.logicalSymbol.rawValue) - \(rangeLabel) has MT5 mismatches; repair is disabled")
                     continue
                 }
                 let decision = RepairPolicy().decide(
@@ -97,6 +103,7 @@ public struct DatabaseVerifierRepairProductionAgent: ProductionAgent {
                     guard recheck.result.isClean else {
                         throw RepairError.refused("post-repair verification still reports \(recheck.result.mismatches.count) mismatch(es)")
                     }
+                    context.logger.repair("\(mapping.logicalSymbol.rawValue) - \(rangeLabel) repaired, reverified against MT5, UTC correct and all canonical data clean")
                     repaired += 1
                 }
             } catch let error as RepairError {

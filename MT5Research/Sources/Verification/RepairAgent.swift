@@ -34,7 +34,8 @@ public struct RepairAgent: Sendable {
         case .refuse(let reason):
             throw RepairError.refused(reason)
         case .repairCanonicalOnly(let reason):
-            logger.repair("\(range.logicalSymbol.rawValue): \(reason)")
+            let rangeLabel = OperatorStatusText.monthRangeLabel(start: range.mt5Start, endExclusive: range.mt5EndExclusive)
+            logger.repair("\(range.logicalSymbol.rawValue) - repairing canonical M1 OHLC for \(rangeLabel): \(reason)")
             guard !replacementBars.isEmpty else {
                 throw RepairError.refused("replacement range is empty")
             }
@@ -80,6 +81,7 @@ public struct RepairAgent: Sendable {
                     details: reason,
                     batchId: first.batchId
                 )
+                logger.repair("\(range.logicalSymbol.rawValue) - \(rangeLabel) repair written and canonical readback clean")
             } catch {
                 let repairError = error
                 do {

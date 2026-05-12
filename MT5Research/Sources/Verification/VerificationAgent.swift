@@ -131,7 +131,8 @@ public struct VerificationAgent: Sendable {
                 latestClosed: state.latestIngestedClosedMT5ServerTime,
                 random: &generator
             )
-            logger.verify("Random MT5 cross-check \(index)/\(randomRanges): \(range.logicalSymbol.rawValue) \(range.mt5Start.rawValue)..<\(range.mt5EndExclusive.rawValue)")
+            let rangeLabel = OperatorStatusText.monthRangeLabel(start: range.mt5Start, endExclusive: range.mt5EndExclusive)
+            logger.verify("Random MT5 cross-check \(index)/\(randomRanges): \(range.logicalSymbol.rawValue) - checking \(rangeLabel)")
             let outcome = try await verifier.verify(range: range)
             guard outcome.result.isClean else {
                 throw VerificationError.randomCrossCheckFailed(

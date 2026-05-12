@@ -72,6 +72,8 @@ public struct HistoricalRangeVerifier: Sendable {
         guard let mapping = config.symbols.mapping(for: range.logicalSymbol) else {
             throw HistoricalRangeVerifierError.missingSymbolMapping(range.logicalSymbol)
         }
+        let rangeLabel = OperatorStatusText.monthRangeLabel(start: range.mt5Start, endExclusive: range.mt5EndExclusive)
+        logger.verify("\(range.logicalSymbol.rawValue) - checking \(rangeLabel) against MT5 source of truth")
 
         let latestClosedResponse = try bridge.latestClosedM1Bar(mapping.mt5Symbol)
         guard latestClosedResponse.mt5Symbol == mapping.mt5Symbol.rawValue else {
@@ -80,6 +82,7 @@ public struct HistoricalRangeVerifier: Sendable {
         let latestClosed = MT5ServerSecond(rawValue: latestClosedResponse.mt5ServerTime)
 
         let mt5Bars = try fetchMT5Bars(range: range, mapping: mapping, latestClosed: latestClosed)
+        logger.verify("\(range.logicalSymbol.rawValue) - loading canonical M1 OHLC for \(rangeLabel) from ClickHouse")
         let databaseBars = try await CanonicalOhlcStore(clickHouse: clickHouse, database: config.clickHouse.database).fetch(range: range)
         let result = VerificationComparator().compare(
             mt5SourceBars: mt5Bars.map(VerificationBar.init(validatedBar:)),
@@ -87,9 +90,9 @@ public struct HistoricalRangeVerifier: Sendable {
         )
         try await writeVerificationResult(range: range, result: result)
         if result.isClean {
-            logger.verify("\(range.logicalSymbol.rawValue): MT5 range \(range.mt5Start.rawValue)..<\(range.mt5EndExclusive.rawValue) matches canonical data")
+            logger.verify("\(range.logicalSymbol.rawValue) - \(rangeLabel) verified against MT5; UTC correct and all canonical data clean")
         } else {
-            logger.warn("\(range.logicalSymbol.rawValue): MT5 range \(range.mt5Start.rawValue)..<\(range.mt5EndExclusive.rawValue) has \(result.mismatches.count) mismatch(es)")
+            logger.warn("\(range.logicalSymbol.rawValue) - \(rangeLabel) is not clean; MT5 comparison found \(result.mismatches.count) mismatch(es)")
         }
         return HistoricalVerificationOutcome(range: range, mt5Bars: mt5Bars, databaseBars: databaseBars, result: result)
     }
@@ -107,6 +110,8 @@ public struct HistoricalRangeVerifier: Sendable {
                 range.mt5EndExclusive.rawValue,
                 cursor.rawValue + Int64(config.app.chunkSize) * Timeframe.m1.seconds
             ))
+            let chunkLabel = OperatorStatusText.monthRangeLabel(start: cursor, endExclusive: chunkEnd)
+            logger.verify("\(range.logicalSymbol.rawValue) - pulling MT5 verification M1 OHLC for \(chunkLabel)")
             let batchId = BatchId.deterministic(
                 brokerSourceId: range.brokerSourceId,
                 logicalSymbol: range.logicalSymbol,
