@@ -126,6 +126,27 @@ final class OperationsTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: "\(url.path).1"))
     }
 
+    func testTerminalColorPolicyUsesBlackBackgroundWhenEnabled() {
+        let policy = TerminalColorPolicy(environment: [:], stdoutIsTTY: true)
+        let colored = policy.colorize("line", as: .cyan)
+
+        XCTAssertTrue(colored.hasPrefix("\u{001B}[40m\u{001B}[36m"))
+        XCTAssertTrue(colored.hasSuffix("\u{001B}[39m"))
+    }
+
+    func testTerminalColorPolicyRespectsNoColor() {
+        let policy = TerminalColorPolicy(environment: ["NO_COLOR": "1"], stdoutIsTTY: true)
+
+        XCTAssertEqual(policy.colorize("line", as: .cyan), "line")
+    }
+
+    func testProductionAgentsHaveNonRedTerminalStatusColorsAndDisplayNames() {
+        for kind in ProductionAgentKind.allCases {
+            XCTAssertFalse(kind.displayName.isEmpty)
+            XCTAssertNotEqual(kind.terminalColor, .red)
+        }
+    }
+
     func testAlertingAgentReportsSafetyBlocksAndDiskPressure() async throws {
         let config = try makeConfig(minimumFreeDiskBytes: 1, clickHouseDiskFreeAlertBytes: 1)
         let now = Int64(Date().timeIntervalSince1970)

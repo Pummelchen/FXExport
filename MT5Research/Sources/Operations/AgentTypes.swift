@@ -1,3 +1,4 @@
+import AppCore
 import Domain
 import Foundation
 
@@ -25,6 +26,56 @@ public enum ProductionAgentKind: String, CaseIterable, Sendable {
         case .checkpointGapAuditor: return 80
         case .backupReadiness: return 90
         case .alerting: return 100
+        }
+    }
+
+    public var displayName: String {
+        switch self {
+        case .historyImporter:
+            return "First-run MT5 history importer"
+        case .liveM1Updater:
+            return "M1 update agent"
+        case .databaseVerifierRepairer:
+            return "Database verifier and cleaner"
+        case .utcTimeAuthority:
+            return "UTC time authority"
+        case .healthMonitor:
+            return "Database and MT5 health monitor"
+        case .supervisorCoordinator:
+            return "Supervisor coordinator"
+        case .symbolMetadataDrift:
+            return "Symbol metadata drift checker"
+        case .checkpointGapAuditor:
+            return "Checkpoint and gap auditor"
+        case .backupReadiness:
+            return "Backup readiness checker"
+        case .alerting:
+            return "Monitoring and alerting agent"
+        }
+    }
+
+    public var terminalColor: TerminalColor {
+        switch self {
+        case .supervisorCoordinator:
+            return .brightCyan
+        case .healthMonitor:
+            return .brightGreen
+        case .utcTimeAuthority:
+            return .brightMagenta
+        case .symbolMetadataDrift:
+            return .brightBlue
+        case .historyImporter:
+            return .green
+        case .liveM1Updater:
+            return .cyan
+        case .databaseVerifierRepairer:
+            return .magenta
+        case .checkpointGapAuditor:
+            return .yellow
+        case .backupReadiness:
+            return .blue
+        case .alerting:
+            return .gray
         }
     }
 }

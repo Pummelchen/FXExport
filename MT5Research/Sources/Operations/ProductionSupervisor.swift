@@ -86,6 +86,7 @@ public struct ProductionSupervisor: Sendable {
                         continue
                     }
                     do {
+                        logAgentStart(agent.descriptor.kind, message: "Connecting to MT5 bridge now", startedAt: startedAt)
                         logger.db("Connecting MT5 bridge for \(agent.descriptor.kind.rawValue)")
                         bridge = try bridgeConnector()
                         logger.ok("MT5 bridge connected for supervised agents")
@@ -120,6 +121,7 @@ public struct ProductionSupervisor: Sendable {
                 )
 
                 do {
+                    logAgentStart(agent.descriptor.kind, message: "Running scheduled task now", startedAt: startedAt)
                     let outcome = try await agent.run(context: context, startedAt: startedAt)
                     await recordAndLog(outcome)
                     Self.updatePersistentBlocks(
@@ -172,17 +174,43 @@ public struct ProductionSupervisor: Sendable {
             await recoverClickHouseIfNeeded(after: error)
         }
 
-        let message = "\(outcome.agent.rawValue): \(outcome.message)"
+        logger.agentStatus(
+            agentId: outcome.agent.rawValue,
+            displayName: outcome.agent.displayName,
+            message: Self.statusMessage(for: outcome),
+            color: outcome.agent.terminalColor,
+            levelName: "agent_\(outcome.status.rawValue)",
+            details: outcome.details,
+            isError: outcome.status == .failed,
+            writeAlert: outcome.status == .warning || outcome.status == .failed,
+            timestampUtc: outcome.finishedAtUtc.rawValue
+        )
+    }
+
+    private func logAgentStart(_ kind: ProductionAgentKind, message: String, startedAt: Date) {
+        logger.agentStatus(
+            agentId: kind.rawValue,
+            displayName: kind.displayName,
+            message: message,
+            color: kind.terminalColor,
+            levelName: "agent_start",
+            timestampUtc: Int64(startedAt.timeIntervalSince1970)
+        )
+    }
+
+    private static func statusMessage(for outcome: AgentOutcome) -> String {
+        let prefix: String
         switch outcome.status {
         case .ok:
-            logger.ok(message)
+            prefix = "OK"
         case .warning:
-            logger.alert(message, details: outcome.details)
+            prefix = "WARNING"
         case .failed:
-            logger.alert(message, details: outcome.details)
+            prefix = "ERROR"
         case .skipped:
-            logger.info(message)
+            prefix = "SKIPPED"
         }
+        return "\(prefix): \(outcome.message) (\(outcome.durationMilliseconds) ms)"
     }
 
     private static func isBridgeRelated(_ error: Error) -> Bool {

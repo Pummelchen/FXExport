@@ -339,7 +339,7 @@ Global options:
 
 Use `--skip-bridge` only for the early preflight before the EA is attached. A production go-live run should use full `startcheck` without skips.
 
-`failure-guide` prints the built-in operational failure catalog. It covers ClickHouse outages and exceptions, MT5 bridge disconnects, protocol errors, unsynchronized MT5 history, missing or mismatched verified broker UTC offsets, bad OHLC data, canonical readback failures, duplicate canonical keys, interrupted first-run checkpoints, repair refusal, backtest readiness blocks, disk pressure, and crash/reboot recovery. Each scenario includes what the program does automatically, how data safety is preserved, and the exact human recovery steps when automation cannot safely continue.
+`failure-guide` prints the built-in operational failure catalog. It covers ClickHouse outages and exceptions, MT5 bridge disconnects, protocol errors, unsynchronized MT5 history, missing or mismatched verified broker UTC offsets, bad OHLC data, canonical readback failures, duplicate canonical keys, interrupted first-run checkpoints, repair refusal, history-data readiness blocks, disk pressure, and crash/reboot recovery. Each scenario includes what the program does automatically, how data safety is preserved, and the exact human recovery steps when automation cannot safely continue.
 
 `symbol-check` returns a non-zero validation exit code if any configured symbol is missing, not selected, or has different digits than `Config/symbols.json`.
 
@@ -350,6 +350,19 @@ Use `--skip-bridge` only for the early preflight before the EA is attached. A pr
 `data-check` runs the same safety gate external backtest applications should use, then reads verified canonical M1 bars directly from ClickHouse into a columnar `ColumnarOhlcSeries`. If `"use_metal": true` is set in the config, it also prepares read-only Metal buffers from the same arrays. No local cache is written.
 
 `export-cache`, `backtest`, and `optimize` intentionally fail closed. FXExport is the history-data provider; strategy execution, parameter sweeps, durable optimizer jobs, and result persistence belong in the external Swift backtest application.
+
+## Terminal Output
+
+When stdout is a TTY and `NO_COLOR` is not set, FXExport uses ANSI colors compatible with the macOS Bash 3 terminal. The logger applies a black background to colored terminal lines. Red is reserved for actual error lines and failed agent statuses.
+
+During `supervise`, every production agent prints a timestamped status line with its own non-red color:
+
+```text
+2026-05-15 13:34:16 - Agent live_m1_updater (M1 update agent) - Running scheduled task now
+2026-05-15 13:34:16 - Agent live_m1_updater (M1 update agent) - OK: no new closed M1 bars available (14 ms)
+```
+
+Warnings and skipped work use the agent's assigned color instead of red. Failed agent outcomes use red and are also written to the alert sink when persistent alerts are enabled.
 
 ## History Data Readiness Gate
 
@@ -445,7 +458,7 @@ Implemented:
 
 - Swift Package Manager project.
 - Strong domain types.
-- ANSI terminal logger with `NO_COLOR` support.
+- ANSI terminal logger with black-background color output, `NO_COLOR` support, and per-agent supervisor status lines.
 - Persistent JSONL log and alert files with size-based rotation.
 - JSON config loading.
 - DB-backed verified broker offset authority and explicit UTC conversion.

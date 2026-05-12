@@ -59,7 +59,7 @@ public struct Logger: Sendable {
 
     public func alert(_ message: String, details: String = "") {
         let fullMessage = details.isEmpty ? message : "\(message) | \(details)"
-        emit("[ALERT]", " " + fullMessage, color: .red, levelName: "alert", component: "alert")
+        emit("[ALERT]", " " + fullMessage, color: .yellow, levelName: "alert", component: "alert")
         alertSink?.write(level: "alert", component: "alert", message: fullMessage)
     }
 
@@ -88,8 +88,46 @@ public struct Logger: Sendable {
         emit("[DEBUG]", " " + message, color: .gray, levelName: "debug", component: "app")
     }
 
+    public func agentStatus(
+        agentId: String,
+        displayName: String,
+        message: String,
+        color: TerminalColor,
+        levelName: String,
+        details: String = "",
+        isError: Bool = false,
+        writeAlert: Bool = false,
+        timestampUtc: Int64? = nil
+    ) {
+        guard level >= .normal || isError else { return }
+        let fullMessage = details.isEmpty ? message : "\(message) | \(details)"
+        let timestamp = Self.terminalTimestampString(timestampUtc: timestampUtc)
+        let line = "\(timestamp) - Agent \(agentId) (\(displayName)) - \(fullMessage)"
+        let terminalColor: TerminalColor = isError ? .red : color
+        print(colorPolicy.colorize(line, as: terminalColor))
+        persistentLogSink?.write(level: levelName, component: "agent.\(agentId)", message: fullMessage)
+        if writeAlert {
+            alertSink?.write(level: levelName, component: "agent.\(agentId)", message: fullMessage)
+        }
+    }
+
     private func emit(_ prefix: String, _ message: String, color: TerminalColor, levelName: String, component: String) {
-        print(colorPolicy.colorize(prefix, as: color) + message)
+        print(colorPolicy.colorize(prefix + message, as: color))
         persistentLogSink?.write(level: levelName, component: component, message: message)
+    }
+
+    private static func terminalTimestampString(timestampUtc: Int64?) -> String {
+        let date: Date
+        if let timestampUtc {
+            date = Date(timeIntervalSince1970: TimeInterval(timestampUtc))
+        } else {
+            date = Date()
+        }
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return formatter.string(from: date)
     }
 }
