@@ -310,6 +310,8 @@ Then start a Swift command that listens for the EA.
 At startup, commands that require ClickHouse first run a local readiness check. If local ClickHouse is stopped, the program tries to start it and waits for the HTTP endpoint before continuing. Commands that require MT5 print action-oriented bridge setup guidance when the EA/socket is not ready instead of leaving the user with only a low-level socket error.
 
 ```bash
+swift run FXExport
+swift run FXExport shell --config-dir Config
 swift run FXExport migrate
 swift run FXExport bridge-check
 swift run FXExport symbol-check
@@ -336,6 +338,20 @@ Global options:
 --verbose
 --debug
 ```
+
+Running `FXExport` without a command starts the resident interactive command shell. The app keeps printing normal status lines to the terminal and also shows a `>` prompt. Paste the same command string you would normally pass after the binary, for example `supervise --with-backfill`, `verify --random-ranges 20`, or `repair --symbol EURUSD --from 2020-01-01 --to 2020-02-01`.
+
+Shell control commands:
+
+```text
+status   show the active command
+stop     gracefully cancel the active command and wait for shutdown
+wait     wait until the active command finishes
+help     show shell help
+exit     gracefully stop the active command and close the shell
+```
+
+If a new app command is pasted while `live`, `supervise`, `backfill`, or another active command is running, the shell first requests graceful cancellation and waits for the command task to return. It does not mark unfinished ingest work complete; checkpoints still advance only through the normal validated insert and canonical readback path.
 
 `startcheck` options:
 

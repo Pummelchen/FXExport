@@ -239,6 +239,17 @@ final class OperationsTests: XCTestCase {
         XCTAssertEqual(policy.colorize("line", as: .cyan), "line")
     }
 
+    func testCommandLineTokenizerHandlesQuotedInteractiveCommands() throws {
+        let tokens = try CommandLineTokenizer().tokenize("repair --symbol EURUSD --from '2020-01-01' --to \"2020-02-01\"")
+        XCTAssertEqual(tokens, ["repair", "--symbol", "EURUSD", "--from", "2020-01-01", "--to", "2020-02-01"])
+    }
+
+    func testCommandLineTokenizerRejectsUnterminatedQuote() {
+        XCTAssertThrowsError(try CommandLineTokenizer().tokenize("backfill --symbols 'EURUSD,USDJPY")) { error in
+            XCTAssertEqual(error as? CommandLineTokenizerError, .unterminatedQuote("'"))
+        }
+    }
+
     func testProductionAgentsHaveNonRedTerminalStatusColorsAndDisplayNames() {
         for kind in ProductionAgentKind.allCases {
             XCTAssertFalse(kind.displayName.isEmpty)

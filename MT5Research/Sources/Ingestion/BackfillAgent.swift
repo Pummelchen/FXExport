@@ -102,6 +102,7 @@ public struct BackfillAgent: Sendable {
         let auditStore = IngestAuditStore(clickHouse: clickHouse, database: config.clickHouse.database)
 
         for mapping in mappings {
+            try Task.checkCancellation()
             do {
                 try await backfill(
                     mapping: mapping,
@@ -165,6 +166,7 @@ public struct BackfillAgent: Sendable {
         var cursor = resumeDecision.cursor
 
         while cursor.rawValue <= latestClosed.rawValue {
+            try Task.checkCancellation()
             let range = batchBuilder.nextRange(start: cursor, endInclusive: latestClosed)
             let batchId = BatchId.deterministic(
                 brokerSourceId: config.brokerTime.brokerSourceId,
@@ -189,6 +191,7 @@ public struct BackfillAgent: Sendable {
                 offsetAuthoritySHA256: offsetAuthoritySHA256
             )
             do {
+                try Task.checkCancellation()
                 let sourceRange = try await sourceVerifier.fetchStableRange(
                     mt5Symbol: mapping.mt5Symbol,
                     from: range.from,
@@ -202,6 +205,7 @@ public struct BackfillAgent: Sendable {
                         maxBars: config.app.chunkSize
                     )
                 }
+                try Task.checkCancellation()
                 try await recordChunkOperation(
                     auditStore: auditStore,
                     mapping: mapping,

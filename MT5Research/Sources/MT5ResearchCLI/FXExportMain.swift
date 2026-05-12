@@ -14,7 +14,13 @@ import Verification
 @main
 struct MT5ResearchCLI {
     static func main() async {
-        let result = await run(arguments: Array(CommandLine.arguments.dropFirst()))
+        let arguments = Array(CommandLine.arguments.dropFirst())
+        let result: ExitCode
+        if InteractiveCommandSession.shouldStart(arguments: arguments) {
+            result = await InteractiveCommandSession(startupArguments: arguments).run()
+        } else {
+            result = await run(arguments: arguments)
+        }
         Darwin.exit(result.rawValue)
     }
 
@@ -25,6 +31,9 @@ struct MT5ResearchCLI {
             if options.command == .help {
                 printUsage()
                 return .success
+            }
+            if options.command == .interactive {
+                return await InteractiveCommandSession(startupArguments: arguments).run()
             }
             if options.command == .failureGuide {
                 print(OperationalFailureGuide.catalogText())
@@ -242,6 +251,9 @@ struct MT5ResearchCLI {
             case .help:
                 printUsage()
                 return .success
+
+            case .interactive:
+                return await InteractiveCommandSession(startupArguments: arguments).run()
             }
         } catch let error as CLIError {
             print("[ERROR] \(error.description)")
@@ -311,6 +323,9 @@ struct MT5ResearchCLI {
             print(OperationalFailureGuide.advice(for: error).formatted)
             activeLogger?.alert("ClickHouse operation failed", details: error.description)
             return .clickHouse
+        } catch is CancellationError {
+            activeLogger?.info("Command cancelled gracefully")
+            return .success
         } catch {
             print("[ERROR] \(error)")
             activeLogger?.alert("Unexpected command failure", details: String(describing: error))
@@ -643,9 +658,11 @@ struct MT5ResearchCLI {
 
     private static func printUsage() {
         print("""
+        FXExport [shell options]
         FXExport <command> [options]
 
         Commands:
+          shell
           migrate
           bridge-check
           symbol-check
@@ -666,11 +683,17 @@ struct MT5ResearchCLI {
           --config Config/history_data.json   # data-check only
           --verbose
           --debug
+
+        Interactive shell:
+          Running FXExport without a command starts the resident prompt.
+          Type commands like `supervise --with-backfill` at `>` without restarting the app.
+          Type `status`, `stop`, `wait`, `help`, or `exit` for shell control.
         """)
     }
 }
 
 enum Command: Equatable {
+    case interactive
     case migrate
     case bridgeCheck
     case symbolCheck
@@ -691,7 +714,7 @@ enum Command: Equatable {
 private extension Command {
     var requiresClickHouseStartupCheck: Bool {
         switch self {
-        case .help, .failureGuide, .symbolCheck, .exportCache, .backtest, .optimize:
+        case .help, .interactive, .failureGuide, .symbolCheck, .exportCache, .backtest, .optimize:
             return false
         case .migrate, .bridgeCheck, .backfill, .live, .supervise, .startcheck, .verify, .repair, .dataCheck:
             return true
@@ -706,7 +729,7 @@ private extension Command {
             return "backtest has been removed from FXExport. Use data-check to verify/load historical data, then run strategies in an external Swift app through the FXExportHistoryData API."
         case .optimize:
             return "optimize has been removed from FXExport. Long-running optimization belongs in an external Swift app with its own durable job model; FXExport only serves verified OHLC data."
-        case .migrate, .bridgeCheck, .symbolCheck, .backfill, .live, .supervise, .startcheck, .failureGuide, .verify, .repair, .dataCheck, .help:
+        case .interactive, .migrate, .bridgeCheck, .symbolCheck, .backfill, .live, .supervise, .startcheck, .failureGuide, .verify, .repair, .dataCheck, .help:
             return nil
         }
     }
@@ -929,6 +952,7 @@ struct CLIOptions {
 
     private static func parseCommand(_ value: String) throws -> Command {
         switch value {
+        case "shell", "interactive", "console": return .interactive
         case "migrate": return .migrate
         case "bridge-check": return .bridgeCheck
         case "symbol-check": return .symbolCheck
