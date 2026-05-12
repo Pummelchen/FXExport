@@ -42,16 +42,34 @@ public struct OperationalHealthService: Sendable {
 
     public func snapshot() async -> OperationalHealthSnapshot {
         let now = utcNow().rawValue
+        let broker = SQLText.literal(config.brokerTime.brokerSourceId.rawValue)
         do {
             _ = try await clickHouse.execute(.select("SELECT 1", databaseOverride: "default"))
-            let brokerSources = try await scalar("SELECT count() FROM \(config.clickHouse.database).broker_sources WHERE is_active = 1 FORMAT TabSeparated")
-            let canonical = try await scalar("SELECT count() FROM \(config.clickHouse.database).ohlc_m1_canonical FORMAT TabSeparated")
-            let latest = try await optionalScalar("SELECT if(count() = 0, NULL, max(ts_utc)) FROM \(config.clickHouse.database).ohlc_m1_canonical FORMAT TabSeparated")
+            let brokerSources = try await scalar("""
+            SELECT count()
+            FROM \(config.clickHouse.database).broker_sources
+            WHERE broker_source_id = '\(broker)'
+              AND is_active = 1
+            FORMAT TabSeparated
+            """)
+            let canonical = try await scalar("""
+            SELECT count()
+            FROM \(config.clickHouse.database).ohlc_m1_canonical
+            WHERE broker_source_id = '\(broker)'
+            FORMAT TabSeparated
+            """)
+            let latest = try await optionalScalar("""
+            SELECT if(count() = 0, NULL, max(ts_utc))
+            FROM \(config.clickHouse.database).ohlc_m1_canonical
+            WHERE broker_source_id = '\(broker)'
+            FORMAT TabSeparated
+            """)
             let unfinished = try await scalar("""
             SELECT count()
             FROM (
                 SELECT operation_type, batch_id, argMax(status, tuple(event_at_utc, status_rank)) AS latest_status
                 FROM \(config.clickHouse.database).ingest_operations
+                WHERE broker_source_id = '\(broker)'
                 GROUP BY operation_type, batch_id
             )
             WHERE NOT (
@@ -60,9 +78,27 @@ public struct OperationalHealthService: Sendable {
             )
             FORMAT TabSeparated
             """)
-            let warningAgents = try await scalar("SELECT count() FROM \(config.clickHouse.database).runtime_agent_state FINAL WHERE status = 'warning' FORMAT TabSeparated")
-            let failedAgents = try await scalar("SELECT count() FROM \(config.clickHouse.database).runtime_agent_state FINAL WHERE status = 'failed' FORMAT TabSeparated")
-            let certificates = try await scalar("SELECT count() FROM \(config.clickHouse.database).data_certificates WHERE certificate_status = 'valid' FORMAT TabSeparated")
+            let warningAgents = try await scalar("""
+            SELECT count()
+            FROM \(config.clickHouse.database).runtime_agent_state FINAL
+            WHERE broker_source_id = '\(broker)'
+              AND status = 'warning'
+            FORMAT TabSeparated
+            """)
+            let failedAgents = try await scalar("""
+            SELECT count()
+            FROM \(config.clickHouse.database).runtime_agent_state FINAL
+            WHERE broker_source_id = '\(broker)'
+              AND status = 'failed'
+            FORMAT TabSeparated
+            """)
+            let certificates = try await scalar("""
+            SELECT count()
+            FROM \(config.clickHouse.database).data_certificates
+            WHERE broker_source_id = '\(broker)'
+              AND certificate_status = 'valid'
+            FORMAT TabSeparated
+            """)
             let status = unfinished == 0 && failedAgents == 0 ? "ok" : "attention_required"
             return OperationalHealthSnapshot(
                 service: "FXExport",

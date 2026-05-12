@@ -201,6 +201,39 @@ final class OperationsTests: XCTestCase {
         }
     }
 
+    func testOperationalHealthServiceScopesCountersToConfiguredBroker() async throws {
+        let clickHouse = HealthRecordingClickHouse()
+        let config = try makeConfig()
+        let service = OperationalHealthService(config: config, clickHouse: clickHouse)
+
+        let snapshot = await service.snapshot()
+        let queries = await clickHouse.queries
+
+        XCTAssertTrue(snapshot.clickHouseOk)
+        XCTAssertEqual(snapshot.brokerSourceCount, 1)
+        XCTAssertEqual(snapshot.canonicalRows, 10)
+        XCTAssertEqual(snapshot.latestCanonicalUtc, 180)
+        XCTAssertEqual(snapshot.unfinishedIngestOperations, 0)
+        XCTAssertEqual(snapshot.warningAgentCount, 0)
+        XCTAssertEqual(snapshot.failedAgentCount, 0)
+        XCTAssertEqual(snapshot.validDataCertificateCount, 2)
+
+        let brokerScopedTables = [
+            "broker_sources",
+            "ohlc_m1_canonical",
+            "ingest_operations",
+            "runtime_agent_state",
+            "data_certificates"
+        ]
+        for table in brokerScopedTables {
+            let tableQueries = queries.filter { $0.contains("FROM db.\(table)") }
+            XCTAssertFalse(tableQueries.isEmpty, "Expected health query for \(table)")
+            for query in tableQueries {
+                XCTAssertTrue(query.contains("broker_source_id = 'demo'"), query)
+            }
+        }
+    }
+
     func testPersistentLogSinkWritesJSONAndRotates() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("FXExport-log-test-\(UUID().uuidString)", isDirectory: true)
@@ -573,6 +606,26 @@ final class OperationsTests: XCTestCase {
         XCTAssertTrue(outcome.details.contains("missing_clean_verification=USDJPY"))
     }
 
+    func testVerificationCoveragePlannerAcceptsOverlappingCoverageLedgerRows() async throws {
+        let config = try makeConfig(symbols: ["EURUSD": 5])
+        let clickHouse = OverlappingVerificationPlannerClickHouse()
+        let agent = VerificationCoveragePlannerAgent(intervalSeconds: 3600)
+        let context = AgentRuntimeContext(
+            config: config,
+            clickHouse: clickHouse,
+            bridge: nil,
+            eventStore: InMemoryAgentEventStore(),
+            logger: Logger(level: .quiet),
+            supervisorStartedAtUtc: UtcSecond(rawValue: 1),
+            repairOnVerifierMismatch: false
+        )
+
+        let outcome = try await agent.run(context: context, startedAt: Date(timeIntervalSince1970: 1))
+
+        XCTAssertEqual(outcome.status, .ok)
+        XCTAssertFalse(outcome.details.contains("coverage_span_gaps"))
+    }
+
     func testBackupRestoreVerifierBlocksOnUnfinishedOperations() async throws {
         let config = try makeConfig()
         let clickHouse = BackupRestoreClickHouse(mode: .unfinished)
@@ -938,6 +991,27 @@ final class OperationsTests: XCTestCase {
         XCTAssertTrue(queries[1].sql.contains("INSERT INTO db.data_certificates"))
     }
 
+    func testDataCertificateAllowsVerifiedEmptySourceGap() async throws {
+        let clickHouse = DataCertificateClickHouse(rows: [
+            coverageRow(utcStart: 60, utcEnd: 120, sourceCount: 0, canonicalCount: 0)
+        ])
+        let store = DataCertificateStore(clickHouse: clickHouse, database: "db")
+
+        let certificate = try await store.certify(
+            brokerSourceId: try BrokerSourceId("demo"),
+            logicalSymbol: try LogicalSymbol("EURUSD"),
+            utcStart: UtcSecond(rawValue: 60),
+            utcEndExclusive: UtcSecond(rawValue: 120),
+            createdAtUtc: UtcSecond(rawValue: 1_000)
+        )
+
+        XCTAssertEqual(certificate.coverageRowCount, 1)
+        XCTAssertEqual(certificate.coverageSourceBarCount, 0)
+        XCTAssertEqual(certificate.coverageCanonicalRowCount, 0)
+        let queries = await clickHouse.queries
+        XCTAssertTrue(queries[1].sql.contains("INSERT INTO db.data_certificates"))
+    }
+
     func testDataCertificateUsesMinimalCoveringRowsWhenCoverageLedgerOverlaps() async throws {
         let clickHouse = DataCertificateClickHouse(rows: [
             coverageRow(utcStart: 60, utcEnd: 120, sourceCount: 1, canonicalCount: 1),
@@ -996,6 +1070,37 @@ private actor FixedClickHouse: ClickHouseClientProtocol {
     }
 }
 
+private actor HealthRecordingClickHouse: ClickHouseClientProtocol {
+    private(set) var queries: [String] = []
+
+    func execute(_ query: ClickHouseQuery) async throws -> String {
+        queries.append(query.sql)
+        let sql = query.sql
+        if sql.trimmingCharacters(in: .whitespacesAndNewlines) == "SELECT 1" {
+            return "1\n"
+        }
+        if sql.contains("FROM db.broker_sources") {
+            return "1\n"
+        }
+        if sql.contains("FROM db.ohlc_m1_canonical") && sql.contains("max(ts_utc)") {
+            return "180\n"
+        }
+        if sql.contains("FROM db.ohlc_m1_canonical") {
+            return "10\n"
+        }
+        if sql.contains("FROM db.ingest_operations") {
+            return "0\n"
+        }
+        if sql.contains("FROM db.runtime_agent_state") {
+            return "0\n"
+        }
+        if sql.contains("FROM db.data_certificates") {
+            return "2\n"
+        }
+        return "0\n"
+    }
+}
+
 private actor VerificationPlannerClickHouse: ClickHouseClientProtocol {
     func execute(_ query: ClickHouseQuery) async throws -> String {
         let sql = query.sql
@@ -1003,10 +1108,26 @@ private actor VerificationPlannerClickHouse: ClickHouseClientProtocol {
             return "1\t60\t120\n"
         }
         if sql.contains("ohlc_m1_verified_coverage") {
-            return sql.contains("logical_symbol = 'EURUSD'") ? "1\t60\t120\t1\t1\n" : "0\t0\t0\t0\t0\n"
+            return sql.contains("logical_symbol = 'EURUSD'") ? "60\t120\n" : ""
         }
         if sql.contains("verification_results") {
             return sql.contains("logical_symbol = 'EURUSD'") ? "1\n" : "0\n"
+        }
+        return "0\n"
+    }
+}
+
+private actor OverlappingVerificationPlannerClickHouse: ClickHouseClientProtocol {
+    func execute(_ query: ClickHouseQuery) async throws -> String {
+        let sql = query.sql
+        if sql.contains("ohlc_m1_canonical") {
+            return "2\t60\t120\n"
+        }
+        if sql.contains("ohlc_m1_verified_coverage") {
+            return "60\t120\n60\t180\n"
+        }
+        if sql.contains("verification_results") {
+            return "1\n"
         }
         return "0\n"
     }
@@ -1264,7 +1385,8 @@ private actor RecordingCommandRunner: SystemCommandRunning {
 
 private func makeConfig(
     minimumFreeDiskBytes: Int64 = SupervisorConfig.default.minimumFreeDiskBytes,
-    clickHouseDiskFreeAlertBytes: Int64 = SupervisorConfig.default.clickHouseDiskFreeAlertBytes
+    clickHouseDiskFreeAlertBytes: Int64 = SupervisorConfig.default.clickHouseDiskFreeAlertBytes,
+    symbols: [String: UInt8] = ["EURUSD": 5, "USDJPY": 3]
 ) throws -> ConfigBundle {
     let appData = """
     {
@@ -1300,10 +1422,13 @@ private func makeConfig(
             brokerSourceId: try BrokerSourceId("demo"),
             offsetSegments: []
         ),
-        symbols: SymbolConfig(symbols: [
-            SymbolMapping(logicalSymbol: try LogicalSymbol("EURUSD"), mt5Symbol: try MT5Symbol("EURUSD"), digits: try Digits(5)),
-            SymbolMapping(logicalSymbol: try LogicalSymbol("USDJPY"), mt5Symbol: try MT5Symbol("USDJPY"), digits: try Digits(3))
-        ])
+        symbols: SymbolConfig(symbols: try symbols.keys.sorted().map { symbol in
+            SymbolMapping(
+                logicalSymbol: try LogicalSymbol(symbol),
+                mt5Symbol: try MT5Symbol(symbol),
+                digits: try Digits(Int(symbols[symbol] ?? 5))
+            )
+        })
     )
 }
 

@@ -152,9 +152,10 @@ public struct DataCertificateStore: Sendable {
     }
 
     private func validateCoverageRow(_ row: CoverageCertificateRow, logicalSymbol: LogicalSymbol) throws {
-        guard row.sourceBarCount == row.canonicalRowCount,
-              row.sourceBarCount > 0,
-              row.canonicalRowCount > 0 else {
+        // A verified MT5 source gap is valid evidence when both source and
+        // canonical counts are zero. Reject only mismatched counts; the range
+        // still has cryptographic source/readback/offset hashes.
+        guard row.sourceBarCount == row.canonicalRowCount else {
             throw DataCertificateError.inconsistentCoverageCounts(logicalSymbol, row.rawRow)
         }
         guard row.timeframe == Timeframe.m1.rawValue,
