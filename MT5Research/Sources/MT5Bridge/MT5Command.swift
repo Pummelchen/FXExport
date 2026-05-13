@@ -7,6 +7,7 @@ public enum MT5Command: String, Codable, CaseIterable, Sendable {
     case getSymbolInfo = "GET_SYMBOL_INFO"
     case prepareSymbol = "PREPARE_SYMBOL"
     case getHistoryStatus = "GET_HISTORY_STATUS"
+    case ensureM1MonthHistory = "ENSURE_M1_MONTH_HISTORY"
     case getOldestM1BarTime = "GET_OLDEST_M1_BAR_TIME"
     case getLatestClosedM1Bar = "GET_LATEST_CLOSED_M1_BAR"
     case getRatesRange = "GET_RATES_RANGE"
@@ -27,6 +28,24 @@ public struct SymbolPayload: Codable, Sendable {
 
     public init(mt5Symbol: String) {
         self.mt5Symbol = mt5Symbol
+    }
+}
+
+public struct M1MonthHistoryPayload: Codable, Sendable {
+    public let mt5Symbol: String
+    public let monthStartMT5ServerTs: Int64
+    public let monthEndMT5ServerTsExclusive: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case mt5Symbol = "mt5_symbol"
+        case monthStartMT5ServerTs = "month_start_mt5_server_ts"
+        case monthEndMT5ServerTsExclusive = "month_end_mt5_server_ts_exclusive"
+    }
+
+    public init(mt5Symbol: String, monthStartMT5ServerTs: Int64, monthEndMT5ServerTsExclusive: Int64) {
+        self.mt5Symbol = mt5Symbol
+        self.monthStartMT5ServerTs = monthStartMT5ServerTs
+        self.monthEndMT5ServerTsExclusive = monthEndMT5ServerTsExclusive
     }
 }
 

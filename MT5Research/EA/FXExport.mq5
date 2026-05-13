@@ -155,6 +155,8 @@ void HandleRequest(const string json)
       HandleSymbolInfo(requestId, command, payload);
    else if(command == "GET_HISTORY_STATUS")
       HandleHistoryStatus(requestId, command, payload);
+   else if(command == "ENSURE_M1_MONTH_HISTORY")
+      HandleEnsureM1MonthHistory(requestId, command, payload);
    else if(command == "GET_OLDEST_M1_BAR_TIME")
       HandleOldestM1(requestId, command, payload);
    else if(command == "GET_LATEST_CLOSED_M1_BAR")
@@ -296,6 +298,203 @@ void HandleHistoryStatus(const string requestId, const string command, const str
    response += "\"mt5_symbol\":\"" + JsonEscape(symbol) + "\",";
    response += "\"synchronized\":" + (synchronized != 0 ? "true" : "false") + ",";
    response += "\"bars\":" + IntegerToString(bars);
+   response += "}";
+   SendOK(requestId, command, response);
+}
+
+void HandleEnsureM1MonthHistory(const string requestId, const string command, const string payload)
+{
+   string symbol = JsonStringField(payload, "mt5_symbol");
+   long monthStart = JsonLongField(payload, "month_start_mt5_server_ts");
+   long monthEndExclusive = JsonLongField(payload, "month_end_mt5_server_ts_exclusive");
+
+   if(symbol == "")
+   {
+      SendError(requestId, command, "PROTOCOL_ERROR", "ENSURE_M1_MONTH_HISTORY missing mt5_symbol");
+      return;
+   }
+   if(monthStart < 0 || monthEndExclusive <= monthStart || (monthStart % 60) != 0 || (monthEndExclusive % 60) != 0)
+   {
+      SendError(requestId, command, "PROTOCOL_ERROR", "ENSURE_M1_MONTH_HISTORY requires a non-negative minute-aligned month range");
+      return;
+   }
+
+   bool selected = SymbolInfoInteger(symbol, SYMBOL_SELECT);
+   if(!selected)
+   {
+      ResetLastError();
+      selected = SymbolSelect(symbol, true);
+   }
+   if(!selected)
+   {
+      SendError(requestId, command, "SYMBOL_NOT_FOUND", "SymbolSelect failed for " + symbol + ", error=" + IntegerToString(GetLastError()));
+      return;
+   }
+
+   MqlRates latest[];
+   ArraySetAsSeries(latest, true);
+   ResetLastError();
+   int latestCopied = CopyRates(symbol, PERIOD_M1, 1, 1, latest);
+   if(latestCopied != 1)
+   {
+      SendError(requestId, command, "NO_CLOSED_BAR", "Could not determine latest closed M1 bar for " + symbol + ", error=" + IntegerToString(GetLastError()));
+      return;
+   }
+
+   long latestClosed = (long)latest[0].time;
+   long effectiveToExclusive = monthEndExclusive;
+   if(effectiveToExclusive > latestClosed + 60)
+      effectiveToExclusive = latestClosed + 60;
+
+   long synchronizedBefore = 0;
+   long synchronizedAfter = 0;
+   long serverFirstDate = 0;
+   long localFirstBefore = 0;
+   long localFirstAfter = 0;
+
+   ResetLastError();
+   bool hasServerFirstDate = SeriesInfoInteger(symbol, PERIOD_M1, SERIES_SERVER_FIRSTDATE, serverFirstDate);
+   int serverFirstError = GetLastError();
+   SeriesInfoInteger(symbol, PERIOD_M1, SERIES_SYNCHRONIZED, synchronizedBefore);
+   SeriesInfoInteger(symbol, PERIOD_M1, SERIES_FIRSTDATE, localFirstBefore);
+
+   int totalBarsBefore = Bars(symbol, PERIOD_M1);
+   int rangeBarsBefore = 0;
+   int rangeBarsAfter = 0;
+   int copied = 0;
+   int lastError = 0;
+   long firstCopied = 0;
+   long lastCopied = 0;
+   bool loadAttempted = false;
+
+   if(effectiveToExclusive <= monthStart)
+   {
+      SendMonthHistoryStatus(
+         requestId, command, symbol, monthStart, monthEndExclusive, effectiveToExclusive,
+         serverFirstDate, localFirstBefore, localFirstBefore,
+         0, 0, totalBarsBefore, totalBarsBefore,
+         synchronizedBefore != 0, synchronizedBefore != 0,
+         false, false, false, true,
+         0, 0, 0, 0, "future"
+      );
+      return;
+   }
+
+   bool historicalAvailable = hasServerFirstDate && serverFirstDate > 0 && effectiveToExclusive > serverFirstDate;
+   if(!historicalAvailable)
+   {
+      SendMonthHistoryStatus(
+         requestId, command, symbol, monthStart, monthEndExclusive, effectiveToExclusive,
+         serverFirstDate, localFirstBefore, localFirstBefore,
+         0, 0, totalBarsBefore, totalBarsBefore,
+         synchronizedBefore != 0, synchronizedBefore != 0,
+         false, false, false, true,
+         0, 0, 0, serverFirstError, "unavailable"
+      );
+      return;
+   }
+
+   ResetLastError();
+   rangeBarsBefore = Bars(symbol, PERIOD_M1, (datetime)monthStart, (datetime)(effectiveToExclusive - 60));
+   int barsBeforeError = GetLastError();
+   bool alreadyLoaded = (rangeBarsBefore > 0 && synchronizedBefore != 0);
+
+   MqlRates rates[];
+   ArraySetAsSeries(rates, false);
+   loadAttempted = true;
+   ResetLastError();
+   copied = CopyRates(symbol, PERIOD_M1, (datetime)monthStart, (datetime)(effectiveToExclusive - 60), rates);
+   lastError = GetLastError();
+   if(copied < 0)
+   {
+      copied = 0;
+      if(lastError == 0)
+         lastError = barsBeforeError;
+   }
+
+   if(copied > 0)
+   {
+      firstCopied = (long)rates[0].time;
+      lastCopied = (long)rates[copied - 1].time;
+   }
+
+   SeriesInfoInteger(symbol, PERIOD_M1, SERIES_SYNCHRONIZED, synchronizedAfter);
+   SeriesInfoInteger(symbol, PERIOD_M1, SERIES_FIRSTDATE, localFirstAfter);
+   int totalBarsAfter = Bars(symbol, PERIOD_M1);
+   ResetLastError();
+   rangeBarsAfter = Bars(symbol, PERIOD_M1, (datetime)monthStart, (datetime)(effectiveToExclusive - 60));
+   int barsAfterError = GetLastError();
+   if(lastError == 0)
+      lastError = barsAfterError;
+
+   bool loadComplete = (rangeBarsAfter > 0 && synchronizedAfter != 0);
+   string status = "loading";
+   if(loadComplete)
+      status = (copied > 0 || alreadyLoaded ? "loaded" : "partial");
+   else if(copied > 0)
+      status = "partial";
+
+   SendMonthHistoryStatus(
+      requestId, command, symbol, monthStart, monthEndExclusive, effectiveToExclusive,
+      serverFirstDate, localFirstBefore, localFirstAfter,
+      rangeBarsBefore, rangeBarsAfter, totalBarsBefore, totalBarsAfter,
+      synchronizedBefore != 0, synchronizedAfter != 0,
+      historicalAvailable, alreadyLoaded, loadAttempted, loadComplete,
+      copied, firstCopied, lastCopied, lastError, status
+   );
+}
+
+void SendMonthHistoryStatus(
+   const string requestId,
+   const string command,
+   const string symbol,
+   const long monthStart,
+   const long monthEndExclusive,
+   const long effectiveToExclusive,
+   const long serverFirstDate,
+   const long localFirstBefore,
+   const long localFirstAfter,
+   const int rangeBarsBefore,
+   const int rangeBarsAfter,
+   const int totalBarsBefore,
+   const int totalBarsAfter,
+   const bool synchronizedBefore,
+   const bool synchronizedAfter,
+   const bool historicalAvailable,
+   const bool alreadyLoaded,
+   const bool loadAttempted,
+   const bool loadComplete,
+   const int copied,
+   const long firstCopied,
+   const long lastCopied,
+   const int lastError,
+   const string status
+)
+{
+   string response = "{";
+   response += "\"mt5_symbol\":\"" + JsonEscape(symbol) + "\",";
+   response += "\"timeframe\":\"M1\",";
+   response += "\"month_start_mt5_server_ts\":" + IntegerToString(monthStart) + ",";
+   response += "\"month_end_mt5_server_ts_exclusive\":" + IntegerToString(monthEndExclusive) + ",";
+   response += "\"effective_to_mt5_server_ts_exclusive\":" + IntegerToString(effectiveToExclusive) + ",";
+   response += "\"server_first_date_mt5_server_ts\":" + IntegerToString(serverFirstDate) + ",";
+   response += "\"local_first_date_before_mt5_server_ts\":" + IntegerToString(localFirstBefore) + ",";
+   response += "\"local_first_date_after_mt5_server_ts\":" + IntegerToString(localFirstAfter) + ",";
+   response += "\"range_bars_before\":" + IntegerToString(rangeBarsBefore) + ",";
+   response += "\"range_bars_after\":" + IntegerToString(rangeBarsAfter) + ",";
+   response += "\"total_bars_before\":" + IntegerToString(totalBarsBefore) + ",";
+   response += "\"total_bars_after\":" + IntegerToString(totalBarsAfter) + ",";
+   response += "\"series_synchronized_before\":" + (synchronizedBefore ? "true" : "false") + ",";
+   response += "\"series_synchronized_after\":" + (synchronizedAfter ? "true" : "false") + ",";
+   response += "\"historical_available\":" + (historicalAvailable ? "true" : "false") + ",";
+   response += "\"already_loaded\":" + (alreadyLoaded ? "true" : "false") + ",";
+   response += "\"load_attempted\":" + (loadAttempted ? "true" : "false") + ",";
+   response += "\"load_complete\":" + (loadComplete ? "true" : "false") + ",";
+   response += "\"copied_count\":" + IntegerToString(copied) + ",";
+   response += "\"first_mt5_server_ts\":" + IntegerToString(firstCopied) + ",";
+   response += "\"last_mt5_server_ts\":" + IntegerToString(lastCopied) + ",";
+   response += "\"last_error\":" + IntegerToString(lastError) + ",";
+   response += "\"status\":\"" + JsonEscape(status) + "\"";
    response += "}";
    SendOK(requestId, command, response);
 }

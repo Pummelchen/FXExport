@@ -88,6 +88,31 @@ public final class MT5BridgeClient: @unchecked Sendable {
         try request(command: .getHistoryStatus, payload: SymbolPayload(mt5Symbol: mt5Symbol.rawValue), responseType: HistoryStatusDTO.self)
     }
 
+    public func ensureM1MonthHistory(
+        mt5Symbol: MT5Symbol,
+        monthStart: MT5ServerSecond,
+        monthEndExclusive: MT5ServerSecond
+    ) throws -> M1MonthHistoryStatusDTO {
+        guard monthStart.rawValue >= 0 else {
+            throw ProtocolError.invalidField("month_start_mt5_server_ts")
+        }
+        guard monthEndExclusive.rawValue > monthStart.rawValue else {
+            throw ProtocolError.invalidField("month_end_mt5_server_ts_exclusive")
+        }
+        guard monthStart.isMinuteAligned, monthEndExclusive.isMinuteAligned else {
+            throw ProtocolError.invalidField("month range must be minute-aligned")
+        }
+        return try request(
+            command: .ensureM1MonthHistory,
+            payload: M1MonthHistoryPayload(
+                mt5Symbol: mt5Symbol.rawValue,
+                monthStartMT5ServerTs: monthStart.rawValue,
+                monthEndMT5ServerTsExclusive: monthEndExclusive.rawValue
+            ),
+            responseType: M1MonthHistoryStatusDTO.self
+        )
+    }
+
     public func oldestM1BarTime(_ mt5Symbol: MT5Symbol) throws -> SingleTimeResponseDTO {
         try request(command: .getOldestM1BarTime, payload: SymbolPayload(mt5Symbol: mt5Symbol.rawValue), responseType: SingleTimeResponseDTO.self)
     }

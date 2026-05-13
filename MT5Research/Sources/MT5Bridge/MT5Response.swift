@@ -107,6 +107,66 @@ public struct HistoryStatusDTO: Codable, Sendable {
     }
 }
 
+public enum M1MonthHistoryStatus: String, Codable, Sendable {
+    case unavailable
+    case future
+    case loaded
+    case loading
+    case partial
+}
+
+public struct M1MonthHistoryStatusDTO: Codable, Sendable {
+    public let mt5Symbol: String
+    public let timeframe: String
+    public let monthStartMT5ServerTs: Int64
+    public let monthEndMT5ServerTsExclusive: Int64
+    public let effectiveToMT5ServerTsExclusive: Int64
+    public let serverFirstDateMT5ServerTs: Int64
+    public let localFirstDateBeforeMT5ServerTs: Int64
+    public let localFirstDateAfterMT5ServerTs: Int64
+    public let rangeBarsBefore: Int
+    public let rangeBarsAfter: Int
+    public let totalBarsBefore: Int
+    public let totalBarsAfter: Int
+    public let seriesSynchronizedBefore: Bool
+    public let seriesSynchronizedAfter: Bool
+    public let historicalAvailable: Bool
+    public let alreadyLoaded: Bool
+    public let loadAttempted: Bool
+    public let loadComplete: Bool
+    public let copiedCount: Int
+    public let firstMT5ServerTs: Int64
+    public let lastMT5ServerTs: Int64
+    public let lastError: Int
+    public let status: M1MonthHistoryStatus
+
+    enum CodingKeys: String, CodingKey {
+        case mt5Symbol = "mt5_symbol"
+        case timeframe
+        case monthStartMT5ServerTs = "month_start_mt5_server_ts"
+        case monthEndMT5ServerTsExclusive = "month_end_mt5_server_ts_exclusive"
+        case effectiveToMT5ServerTsExclusive = "effective_to_mt5_server_ts_exclusive"
+        case serverFirstDateMT5ServerTs = "server_first_date_mt5_server_ts"
+        case localFirstDateBeforeMT5ServerTs = "local_first_date_before_mt5_server_ts"
+        case localFirstDateAfterMT5ServerTs = "local_first_date_after_mt5_server_ts"
+        case rangeBarsBefore = "range_bars_before"
+        case rangeBarsAfter = "range_bars_after"
+        case totalBarsBefore = "total_bars_before"
+        case totalBarsAfter = "total_bars_after"
+        case seriesSynchronizedBefore = "series_synchronized_before"
+        case seriesSynchronizedAfter = "series_synchronized_after"
+        case historicalAvailable = "historical_available"
+        case alreadyLoaded = "already_loaded"
+        case loadAttempted = "load_attempted"
+        case loadComplete = "load_complete"
+        case copiedCount = "copied_count"
+        case firstMT5ServerTs = "first_mt5_server_ts"
+        case lastMT5ServerTs = "last_mt5_server_ts"
+        case lastError = "last_error"
+        case status
+    }
+}
+
 public struct ServerTimeSnapshotDTO: Codable, Sendable {
     public let timeTradeServer: Int64
     public let timeGMT: Int64

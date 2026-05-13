@@ -69,4 +69,28 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(message.payload.startPosition, 1)
         XCTAssertEqual(message.payload.count, 2)
     }
+
+    func testEnsureM1MonthHistoryPayloadIsVersionedAndTyped() throws {
+        let codec = FramedProtocolCodec()
+        let payload = M1MonthHistoryPayload(
+            mt5Symbol: "EURUSD",
+            monthStartMT5ServerTs: 0,
+            monthEndMT5ServerTsExclusive: 2_678_400
+        )
+        let frame = try codec.encode(
+            command: .ensureM1MonthHistory,
+            requestId: "month-history",
+            timestampSentUtc: .init(rawValue: 1),
+            payload: payload
+        )
+        var parser = FrameParser()
+        let bodies = try parser.append(frame)
+
+        let message = try codec.decode(bodies[0], payloadType: M1MonthHistoryPayload.self)
+
+        XCTAssertEqual(message.command, .ensureM1MonthHistory)
+        XCTAssertEqual(message.payload.mt5Symbol, "EURUSD")
+        XCTAssertEqual(message.payload.monthStartMT5ServerTs, 0)
+        XCTAssertEqual(message.payload.monthEndMT5ServerTsExclusive, 2_678_400)
+    }
 }

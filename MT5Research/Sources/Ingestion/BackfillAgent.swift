@@ -91,7 +91,7 @@ public struct BackfillAgent: Sendable {
             terminalIdentity: terminalIdentity,
             snapshot: liveSnapshot
         )
-        try await ensureHistoricalOffsetAuthorityIfKnown(
+        let monthlyPreparedSymbols = try await ensureHistoricalOffsetAuthorityIfKnown(
             mappings: mappings,
             terminalIdentity: terminalIdentity,
             liveSnapshot: liveSnapshot
@@ -111,7 +111,7 @@ public struct BackfillAgent: Sendable {
         let timeConverter = TimeConverter(offsetMap: offsetMap)
         let validator = OhlcValidator(timeConverter: timeConverter)
         let insertBuilder = ClickHouseInsertBuilder(database: config.clickHouse.database)
-        let batchBuilder = BatchBuilder(chunkSize: config.app.chunkSize)
+        let monthRangeBuilder = HistoryMonthRangeBuilder()
         let sourceVerifier = MT5SourceRangeVerifier()
         let coverageBuilder = CoverageRangeBuilder(offsetMap: offsetMap)
         let auditStore = IngestAuditStore(clickHouse: clickHouse, database: config.clickHouse.database)
@@ -123,11 +123,12 @@ public struct BackfillAgent: Sendable {
                     mapping: mapping,
                     validator: validator,
                     insertBuilder: insertBuilder,
-                    batchBuilder: batchBuilder,
+                    monthRangeBuilder: monthRangeBuilder,
                     sourceVerifier: sourceVerifier,
                     coverageBuilder: coverageBuilder,
                     auditStore: auditStore,
-                    offsetAuthoritySHA256: offsetAuthoritySHA256
+                    offsetAuthoritySHA256: offsetAuthoritySHA256,
+                    historyAlreadyPrepared: monthlyPreparedSymbols.contains(mapping.logicalSymbol)
                 )
             } catch {
                 logger.error("\(mapping.logicalSymbol.rawValue): \(error)")
@@ -140,11 +141,8 @@ public struct BackfillAgent: Sendable {
         mappings: [SymbolMapping],
         terminalIdentity: BrokerServerIdentity,
         liveSnapshot: ServerTimeSnapshotDTO
-    ) async throws {
-        guard BrokerOffsetPolicy.hasAutomaticHistoricalPolicy(for: terminalIdentity) else {
-            logger.info("No code-owned historical UTC offset policy for \(terminalIdentity); requiring audited broker_time_offsets rows from ClickHouse")
-            return
-        }
+    ) async throws -> Set<LogicalSymbol> {
+        var monthlyPreparedSymbols = Set<LogicalSymbol>()
         var requiredFrom: MT5ServerSecond?
         var requiredTo: MT5ServerSecond?
         for mapping in mappings {
@@ -155,12 +153,17 @@ public struct BackfillAgent: Sendable {
                     throw IngestError.digitsMismatch(symbol: mapping.mt5Symbol.rawValue, expected: mapping.digits.rawValue, actual: symbolInfo.digits)
                 }
                 try await ensureHistorySynchronized(mapping: mapping)
-                let oldestResponse = try bridge.oldestM1BarTime(mapping.mt5Symbol)
-                try validateSingleTimeResponse(oldestResponse, expectedMT5Symbol: mapping.mt5Symbol)
                 let latestClosedResponse = try bridge.latestClosedM1Bar(mapping.mt5Symbol)
                 try validateSingleTimeResponse(latestClosedResponse, expectedMT5Symbol: mapping.mt5Symbol)
+                let latestClosed = MT5ServerSecond(rawValue: latestClosedResponse.mt5ServerTime)
+                try await ensureMonthlyHistoryPrepared(mapping: mapping, latestClosed: latestClosed)
+                monthlyPreparedSymbols.insert(mapping.logicalSymbol)
+                let oldestResponse = try bridge.oldestM1BarTime(mapping.mt5Symbol)
+                try validateSingleTimeResponse(oldestResponse, expectedMT5Symbol: mapping.mt5Symbol)
                 let oldest = MT5ServerSecond(rawValue: oldestResponse.mt5ServerTime)
-                let latestExclusive = try addOneMinute(to: MT5ServerSecond(rawValue: latestClosedResponse.mt5ServerTime))
+                let refreshedLatestClosedResponse = try bridge.latestClosedM1Bar(mapping.mt5Symbol)
+                try validateSingleTimeResponse(refreshedLatestClosedResponse, expectedMT5Symbol: mapping.mt5Symbol)
+                let latestExclusive = try addOneMinute(to: MT5ServerSecond(rawValue: refreshedLatestClosedResponse.mt5ServerTime))
                 requiredFrom = MT5ServerSecond(rawValue: min(requiredFrom?.rawValue ?? oldest.rawValue, oldest.rawValue))
                 requiredTo = MT5ServerSecond(rawValue: max(requiredTo?.rawValue ?? latestExclusive.rawValue, latestExclusive.rawValue))
             } catch {
@@ -168,9 +171,13 @@ public struct BackfillAgent: Sendable {
                 if config.app.strictSymbolFailures { throw error }
             }
         }
+        guard BrokerOffsetPolicy.hasAutomaticHistoricalPolicy(for: terminalIdentity) else {
+            logger.info("No code-owned historical UTC offset policy for \(terminalIdentity); requiring audited broker_time_offsets rows from ClickHouse")
+            return monthlyPreparedSymbols
+        }
         guard let requiredFrom, let requiredTo, requiredFrom.rawValue < requiredTo.rawValue else {
             logger.warn("Automatic historical UTC offset policy could not determine an MT5 history range from the selected symbols")
-            return
+            return monthlyPreparedSymbols
         }
         let inserted = try await BrokerOffsetHistoricalPolicyAuthority(
             clickHouse: clickHouse,
@@ -186,17 +193,19 @@ public struct BackfillAgent: Sendable {
         if inserted == 0 {
             logger.ok("Automatic historical broker UTC authority already covers \(requiredFrom.rawValue)..<\(requiredTo.rawValue) for \(terminalIdentity)")
         }
+        return monthlyPreparedSymbols
     }
 
     private func backfill(
         mapping: SymbolMapping,
         validator: OhlcValidator,
         insertBuilder: ClickHouseInsertBuilder,
-        batchBuilder: BatchBuilder,
+        monthRangeBuilder: HistoryMonthRangeBuilder,
         sourceVerifier: MT5SourceRangeVerifier,
         coverageBuilder: CoverageRangeBuilder,
         auditStore: IngestAuditStore,
-        offsetAuthoritySHA256: SHA256DigestHex
+        offsetAuthoritySHA256: SHA256DigestHex,
+        historyAlreadyPrepared: Bool
     ) async throws {
         logger.info("\(mapping.logicalSymbol.rawValue) - preparing MT5 symbol \(mapping.mt5Symbol.rawValue) for historical M1 OHLC import")
         let symbolInfo = try bridge.prepareSymbol(mapping.mt5Symbol)
@@ -206,13 +215,22 @@ public struct BackfillAgent: Sendable {
         }
         try await ensureHistorySynchronized(mapping: mapping)
 
+        let latestClosedResponse = try bridge.latestClosedM1Bar(mapping.mt5Symbol)
+        try validateSingleTimeResponse(latestClosedResponse, expectedMT5Symbol: mapping.mt5Symbol)
+        if !historyAlreadyPrepared {
+            try await ensureMonthlyHistoryPrepared(
+                mapping: mapping,
+                latestClosed: MT5ServerSecond(rawValue: latestClosedResponse.mt5ServerTime)
+            )
+        }
+
         logger.info("\(mapping.logicalSymbol.rawValue) - finding oldest available and latest closed M1 bar in MT5")
         let oldestResponse = try bridge.oldestM1BarTime(mapping.mt5Symbol)
         try validateSingleTimeResponse(oldestResponse, expectedMT5Symbol: mapping.mt5Symbol)
-        let latestClosedResponse = try bridge.latestClosedM1Bar(mapping.mt5Symbol)
-        try validateSingleTimeResponse(latestClosedResponse, expectedMT5Symbol: mapping.mt5Symbol)
+        let refreshedLatestClosedResponse = try bridge.latestClosedM1Bar(mapping.mt5Symbol)
+        try validateSingleTimeResponse(refreshedLatestClosedResponse, expectedMT5Symbol: mapping.mt5Symbol)
         let oldest = MT5ServerSecond(rawValue: oldestResponse.mt5ServerTime)
-        let latestClosed = MT5ServerSecond(rawValue: latestClosedResponse.mt5ServerTime)
+        let latestClosed = MT5ServerSecond(rawValue: refreshedLatestClosedResponse.mt5ServerTime)
         guard oldest.rawValue <= latestClosed.rawValue else {
             throw IngestError.emptyMT5Range(mapping.logicalSymbol.rawValue)
         }
@@ -234,7 +252,8 @@ public struct BackfillAgent: Sendable {
 
         while cursor.rawValue <= latestClosed.rawValue {
             try Task.checkCancellation()
-            let range = batchBuilder.nextRange(start: cursor, endInclusive: latestClosed)
+            let monthRange = try monthRangeBuilder.nextRange(start: cursor, endInclusive: latestClosed)
+            let range = (from: monthRange.from, toExclusive: monthRange.toExclusive)
             let batchId = BatchId.deterministic(
                 brokerSourceId: config.brokerTime.brokerSourceId,
                 logicalSymbol: mapping.logicalSymbol,
@@ -259,17 +278,18 @@ public struct BackfillAgent: Sendable {
             )
             do {
                 try Task.checkCancellation()
+                let monthlyFetchMaxBars = HistoryMonthRangeBuilder.recommendedMonthlyFetchMaxBars
                 let sourceRange = try await sourceVerifier.fetchStableRange(
                     mt5Symbol: mapping.mt5Symbol,
                     from: range.from,
                     toExclusive: range.toExclusive,
-                    maxBars: config.app.chunkSize
+                    maxBars: monthlyFetchMaxBars
                 ) {
                     try bridge.ratesRange(
                         mt5Symbol: mapping.mt5Symbol,
                         from: range.from,
                         toExclusive: range.toExclusive,
-                        maxBars: config.app.chunkSize
+                        maxBars: monthlyFetchMaxBars
                     )
                 }
                 try Task.checkCancellation()
@@ -594,6 +614,86 @@ public struct BackfillAgent: Sendable {
         }
         guard response.timeframe == Timeframe.m1.rawValue else {
             throw IngestError.invalidBridgeResponse("expected M1 rates, got \(response.timeframe)")
+        }
+    }
+
+    private func ensureMonthlyHistoryPrepared(mapping: SymbolMapping, latestClosed: MT5ServerSecond) async throws {
+        let rangeBuilder = HistoryMonthRangeBuilder()
+        let ranges = try rangeBuilder.rangesFromUnixEpoch(through: latestClosed)
+        logger.info("\(mapping.logicalSymbol.rawValue) - checking MT5 M1 history month-by-month from January 1970 to today")
+        for range in ranges {
+            try Task.checkCancellation()
+            let rangeLabel = OperatorStatusText.monthRangeLabel(start: range.from, endExclusive: range.toExclusive)
+            var attempt = 1
+            while true {
+                try Task.checkCancellation()
+                let status = try bridge.ensureM1MonthHistory(
+                    mt5Symbol: mapping.mt5Symbol,
+                    monthStart: range.from,
+                    monthEndExclusive: range.toExclusive
+                )
+                try validateM1MonthHistoryStatus(
+                    status,
+                    expectedMT5Symbol: mapping.mt5Symbol,
+                    expectedRange: range
+                )
+
+                if status.status == .future {
+                    logger.verbose("\(mapping.logicalSymbol.rawValue) - \(rangeLabel) is beyond the latest closed MT5 M1 bar")
+                    return
+                }
+                if !status.historicalAvailable {
+                    logger.verbose("\(mapping.logicalSymbol.rawValue) - \(rangeLabel) has no broker-side M1 history available")
+                    break
+                }
+                if status.loadComplete {
+                    if status.alreadyLoaded {
+                        logger.verbose("\(mapping.logicalSymbol.rawValue) - \(rangeLabel) already loaded in MT5 (\(status.rangeBarsAfter) local M1 bars)")
+                    } else {
+                        logger.ok("\(mapping.logicalSymbol.rawValue) - \(rangeLabel) loaded in MT5 (\(status.copiedCount) M1 bars copied into the terminal cache)")
+                    }
+                    break
+                }
+
+                if attempt == 1 || attempt % 10 == 0 {
+                    logger.warn("\(mapping.logicalSymbol.rawValue) - \(rangeLabel) exists on the broker server but MT5 has not finished loading it; forcing MT5 history download, attempt \(attempt), last MT5 error \(status.lastError)")
+                }
+                attempt += 1
+                let sleepSeconds = min(30, max(2, attempt))
+                try await Task.sleep(nanoseconds: UInt64(sleepSeconds) * 1_000_000_000)
+            }
+        }
+        logger.ok("\(mapping.logicalSymbol.rawValue) - MT5 monthly M1 history availability scan completed through \(latestClosed.rawValue) server time")
+    }
+
+    private func validateM1MonthHistoryStatus(
+        _ status: M1MonthHistoryStatusDTO,
+        expectedMT5Symbol: MT5Symbol,
+        expectedRange: HistoryMonthRange
+    ) throws {
+        guard status.mt5Symbol == expectedMT5Symbol.rawValue else {
+            throw IngestError.invalidBridgeResponse("expected monthly history status for \(expectedMT5Symbol.rawValue), got \(status.mt5Symbol)")
+        }
+        guard status.timeframe == Timeframe.m1.rawValue else {
+            throw IngestError.invalidBridgeResponse("expected M1 monthly history status, got \(status.timeframe)")
+        }
+        guard status.monthStartMT5ServerTs == expectedRange.from.rawValue,
+              status.monthEndMT5ServerTsExclusive == expectedRange.toExclusive.rawValue else {
+            throw IngestError.invalidBridgeResponse("monthly history status range does not match the request")
+        }
+        guard MT5ServerSecond(rawValue: status.monthStartMT5ServerTs).isMinuteAligned,
+              MT5ServerSecond(rawValue: status.monthEndMT5ServerTsExclusive).isMinuteAligned,
+              MT5ServerSecond(rawValue: status.effectiveToMT5ServerTsExclusive).isMinuteAligned else {
+            throw IngestError.invalidBridgeResponse("monthly history status contains a non-minute-aligned timestamp")
+        }
+        guard status.effectiveToMT5ServerTsExclusive <= status.monthEndMT5ServerTsExclusive else {
+            throw IngestError.invalidBridgeResponse("monthly history effective end exceeds requested month end")
+        }
+        if status.historicalAvailable && status.status == .unavailable {
+            throw IngestError.invalidBridgeResponse("monthly history status is unavailable but historical_available is true")
+        }
+        if status.loadComplete && status.status == .loading {
+            throw IngestError.invalidBridgeResponse("monthly history status is loading but load_complete is true")
         }
     }
 

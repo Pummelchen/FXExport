@@ -111,6 +111,8 @@ If `startcheck` stops at the bridge step, follow the terminal message: start MT5
 > backfill --config-dir Config --symbols all
 ```
 
+For each configured symbol, first-run backfill now performs a deterministic MT5 history preparation pass from `1970-01-01 00:00:00` server time up to the latest closed M1 bar. Each calendar month is checked with the EA, broker-available months are forced into the MT5 local history cache with `CopyRates`, and Swift keeps retrying while MT5 reports that broker-side history exists but is not loaded yet. Only after that preparation pass does Swift discover oldest/latest history and write monthly verified OHLC chunks to ClickHouse.
+
 10. Run verification without random MT5 ranges first, then with MT5 random ranges when the bridge is connected:
 
 ```text

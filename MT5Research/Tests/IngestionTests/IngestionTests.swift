@@ -114,6 +114,32 @@ final class IngestionTests: XCTestCase {
         XCTAssertEqual(range.toExclusive.rawValue, 240)
     }
 
+    func testHistoryMonthRangeBuilderStartsAtUnixEpochAndUsesCalendarMonths() throws {
+        let builder = HistoryMonthRangeBuilder()
+        let ranges = try builder.rangesFromUnixEpoch(through: MT5ServerSecond(rawValue: 5_097_540))
+
+        XCTAssertEqual(ranges[0], HistoryMonthRange(from: MT5ServerSecond(rawValue: 0), toExclusive: MT5ServerSecond(rawValue: 2_678_400)))
+        XCTAssertEqual(ranges[1], HistoryMonthRange(from: MT5ServerSecond(rawValue: 2_678_400), toExclusive: MT5ServerSecond(rawValue: 5_097_600)))
+    }
+
+    func testHistoryMonthRangeBuilderResumesAtPartialMonthCursor() throws {
+        let builder = HistoryMonthRangeBuilder()
+        let range = try builder.nextRange(
+            start: MT5ServerSecond(rawValue: 1_209_600),
+            endInclusive: MT5ServerSecond(rawValue: 5_184_000)
+        )
+
+        XCTAssertEqual(range.from.rawValue, 1_209_600)
+        XCTAssertEqual(range.toExclusive.rawValue, 2_678_400)
+    }
+
+    func testMonthlyFetchLimitCoversFullCalendarMonth() {
+        XCTAssertGreaterThanOrEqual(
+            HistoryMonthRangeBuilder.recommendedMonthlyFetchMaxBars,
+            HistoryMonthRangeBuilder.maximumM1BarsInCalendarMonth
+        )
+    }
+
     func testCheckpointStoreRoundTrip() async throws {
         let store = InMemoryCheckpointStore()
         let state = IngestState(
